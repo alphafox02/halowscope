@@ -11,6 +11,11 @@ It covers about 2.21 to 2.79 GHz: 2.4 GHz Wi-Fi, Bluetooth and Zigbee, and
 the 2.3 and 2.5 to 2.7 GHz bands, either as an 80 or 16 MHz wide live view
 or as a sweep across the whole range.
 
+![HaLowScope in a browser: live spectrum and waterfall of 2400 to 2480 MHz, with Wi-Fi bursts on channel 1](docs/screenshot.jpg)
+
+*The page as served by the board over HaLow: 80 MHz around 2440 MHz, with
+Wi-Fi bursts on channel 1 (2412 MHz) and the receiver controls on the left.*
+
 ## Hardware
 
 The Elecrow "ESP32 WiFi HaLow Module": ESP32-S3 with 16 MB flash and 8 MB
