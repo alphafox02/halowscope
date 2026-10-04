@@ -1,0 +1,142 @@
+<!doctype html>
+<!-- HaLowScope. Adapted from eSpDR's iqstream page (https://github.com/h0m3us3r/eSpDR, 0BSD). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>HaLowScope</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="bar">
+  <button id="menu" class="icon" type="button" aria-label="Show or hide the controls" aria-expanded="true">&#9776;</button>
+  <button id="run" class="run" type="button" aria-label="Start or stop streaming">&#9654;</button>
+  <div class="tuning">
+    <div id="frequency" class="frequency" tabindex="0" role="group"
+         title="LO: scroll or click the top or bottom of a digit; press Enter or type to enter a frequency"
+         aria-label="LO frequency: scroll or click a digit, press Enter to type one"></div>
+    <input id="frequency-entry" class="frequency-entry" hidden inputmode="decimal" spellcheck="false"
+           aria-label="LO frequency, MHz">
+    <div id="span" class="span"></div>
+  </div>
+  <div class="pills">
+    <span id="pill-link" class="pill" title="Connection to the server">connecting</span>
+    <span id="pill-state" class="pill" title="Stream">&hellip;</span>
+    <span id="pill-errors" class="pill" title="HaLow signal at the board">&hellip;</span>
+  </div>
+</header>
+
+<main>
+  <aside id="sidebar" aria-label="Controls">
+    <details id="panel-sweep" data-panel="sweep">
+      <summary>Sweep</summary>
+      <div class="row check"><label><input id="sweep-on" type="checkbox"> Sweep the LO across a range</label></div>
+      <div class="row"><label for="sweep-start">Start</label><input id="sweep-start" type="text" inputmode="decimal" spellcheck="false" value="2400"><span class="unit">MHz</span></div>
+      <div class="row"><label for="sweep-stop">Stop</label><input id="sweep-stop" type="text" inputmode="decimal" spellcheck="false" value="2500"><span class="unit">MHz</span></div>
+      <div class="row buttons" id="sweep-presets">
+        <button type="button" data-start="2400" data-stop="2500">2.4 GHz ISM</button>
+        <button type="button" data-start="2300" data-stop="2400">2.3 GHz</button>
+        <button type="button" data-start="2496" data-stop="2690">2.5&ndash;2.7 GHz</button>
+        <button type="button" data-start="2210" data-stop="2790">Everything</button>
+      </div>
+      <p class="note">Each step retunes the LO and keeps the middle of one snapshot. Double-click a signal to tune there and leave the sweep. Reception was verified from 2356 to 2476 MHz; the PLL locks from about 2207 to 2795 MHz.</p>
+    </details>
+
+    <details id="panel-receiver" data-panel="receiver">
+      <summary>Receiver</summary>
+      <div class="row"><label for="lo">LO</label><input id="lo" type="text" inputmode="decimal" spellcheck="false"><span class="unit">MHz</span></div>
+      <p class="note" id="lo-note"></p>
+      <div class="row"><span class="label">Sample rate</span>
+        <div class="segmented" id="rate"><button type="button" data-v="80">80 Msps</button><button type="button" data-v="16">16 Msps</button></div></div>
+      <div class="row"><span class="label">Analog width</span>
+        <div class="segmented" id="width"><button type="button" data-v="40">40 MHz</button><button type="button" data-v="20">20 MHz</button></div></div>
+      <div class="row slider"><label for="filter">RC filter</label><input id="filter" type="range" min="0" max="63"><output for="filter"></output></div>
+      <div class="row slider" id="filter2-row" hidden><label for="filter2">RC filter B</label><input id="filter2" type="range" min="0" max="63"><output for="filter2"></output></div>
+      <div class="row check"><label><input id="filter-split" type="checkbox"> Set the pair's two codes separately</label></div>
+      <p class="note">Sample rate: how much you see, 80 or 16 MHz around the LO.<br>
+        RC filter: what gets in. 0 lets in about 69 MHz; higher numbers narrow it. Choosing 16 Msps sets 54, so signals outside the 16 MHz view do not leak into it.<br>
+        Width: picks one of two filter banks. Leave it at 40 MHz unless you are experimenting.</p>
+      <div class="row slider"><label for="gain">Gain</label><input id="gain" type="range" min="0" max="127"><output for="gain"></output></div>
+      <p class="note">A gain-table index, not dB: about 1 dB a step from 35 to 76; 83 and above repeat the low end.</p>
+      <div class="row slider"><label for="rf">RF stage</label><input id="rf" type="range" min="0" max="511"><output for="rf"></output><label class="auto"><input id="rf-auto" type="checkbox"> auto</label></div>
+      <div class="row slider"><label for="bb">BB stage</label><input id="bb" type="range" min="0" max="127"><output for="bb"></output><label class="auto"><input id="bb-auto" type="checkbox"> auto</label></div>
+      <h3>DC offset</h3>
+      <div class="row slider"><label for="dc0">I offset A</label><input id="dc0" type="range" min="0" max="511"><output for="dc0"></output><label class="auto"><input id="dc0-auto" type="checkbox"> auto</label></div>
+      <div class="row slider"><label for="dc1">I offset B</label><input id="dc1" type="range" min="0" max="511"><output for="dc1"></output><label class="auto"><input id="dc1-auto" type="checkbox"> auto</label></div>
+      <div class="row slider"><label for="dc2">Q offset A</label><input id="dc2" type="range" min="0" max="511"><output for="dc2"></output><label class="auto"><input id="dc2-auto" type="checkbox"> auto</label></div>
+      <div class="row slider"><label for="dc3">Q offset B</label><input id="dc3" type="range" min="0" max="511"><output for="dc3"></output><label class="auto"><input id="dc3-auto" type="checkbox"> auto</label></div>
+      <p class="note">Codes shift the ADC's zero by about 1.2 (A) and 0.8 (B) counts each; auto keeps the calibration.</p>
+      <h3>I/Q correction</h3>
+      <div class="row check"><label><input id="iq-auto" type="checkbox"> Calibrated (automatic)</label></div>
+      <div class="row slider"><label for="iq-amplitude">Amplitude</label><input id="iq-amplitude" type="range" min="-16" max="15"><output for="iq-amplitude"></output></div>
+      <div class="row slider"><label for="iq-phase">Phase</label><input id="iq-phase" type="range" min="-32" max="31"><output for="iq-phase"></output></div>
+      <p class="note" id="receiver-note">Each change reconfigures the receiver between snapshots.</p>
+    </details>
+
+    <details id="panel-fft" data-panel="fft">
+      <summary>FFT</summary>
+      <div class="row"><label for="fft-size">Resolution</label><select id="fft-size"></select></div>
+      <div class="row"><label for="fft-window">Window</label><select id="fft-window"></select></div>
+      <div class="row slider"><label for="fft-rate">Speed</label><input id="fft-rate" type="range" min="1" max="100"><output for="fft-rate"></output></div>
+      <div class="row slider"><label for="fft-averaging">Averaging</label><input id="fft-averaging" type="range" min="0" max="13"><output for="fft-averaging"></output></div>
+      <div class="row"><span class="label">Detector</span>
+        <div class="segmented" id="fft-detector"><button type="button" data-v="average">Average</button><button type="button" data-v="peak">Peak</button></div></div>
+      <div class="row check"><label><input id="fft-dc" type="checkbox"> Remove DC</label></div>
+      <p class="note" id="fft-note"></p>
+    </details>
+
+    <details id="panel-display" data-panel="display">
+      <summary>Display</summary>
+      <div class="row slider"><label for="s-attack">Spectrum attack</label><input id="s-attack" type="range" min="0" max="1" step="0.05"><output for="s-attack"></output></div>
+      <div class="row slider"><label for="s-decay">Spectrum decay</label><input id="s-decay" type="range" min="0" max="1" step="0.05"><output for="s-decay"></output></div>
+      <div class="row slider"><label for="w-attack">Waterfall attack</label><input id="w-attack" type="range" min="0" max="1" step="0.05"><output for="w-attack"></output></div>
+      <div class="row slider"><label for="w-decay">Waterfall decay</label><input id="w-decay" type="range" min="0" max="1" step="0.05"><output for="w-decay"></output></div>
+      <div class="row"><label for="palette">Colors</label><select id="palette"></select></div>
+      <div id="palette-swatch" class="swatch" aria-hidden="true"></div>
+      <div class="row"><label for="channels">Channels</label>
+        <select id="channels"><option value="none">None</option><option value="ble">Bluetooth LE</option><option value="wifi">Wi-Fi</option></select></div>
+      <div class="row check"><label><input id="fill" type="checkbox"> Fill under the spectrum</label></div>
+      <div class="row check"><label><input id="peak-hold" type="checkbox"> Peak hold</label>
+        <button id="peak-reset" type="button" class="small">Reset</button></div>
+      <div class="row buttons"><button id="auto-levels" type="button">Auto levels</button><button id="clear-waterfall" type="button">Clear waterfall</button></div>
+      <p class="note">Wheel or pinch to zoom, drag to pan, click to place a marker (right-click removes it), double-click to tune there. Keys: + &minus; 0 &larr; &rarr;.</p>
+    </details>
+
+    <details id="panel-device" data-panel="device">
+      <summary>Device</summary>
+      <dl class="stats" id="device-stats"></dl>
+      <p class="note">ESP32-S3 with a Quectel FGH100M (Morse Micro MM6108), served over Wi-Fi HaLow.</p>
+    </details>
+
+    <details id="panel-link" data-panel="link">
+      <summary>Connection</summary>
+      <dl class="stats" id="link-stats"></dl>
+      <div class="row slider"><label for="max-fps">Max frames/s</label><input id="max-fps" type="range" min="0" max="100"><output for="max-fps"></output></div>
+      <div class="row"><label for="max-bins">Resolution</label>
+        <select id="max-bins"><option value="-1">Auto</option><option value="0">Screen</option><option value="2048">2048 bins</option><option value="1024">1024 bins</option>
+          <option value="512">512 bins</option><option value="256">256 bins</option></select></div>
+      <p class="note">One browser at a time: opening the page elsewhere takes over from this one. Frames the link cannot carry are merged into the next, so short signals still show.</p>
+    </details>
+  </aside>
+
+  <section class="plot">
+    <div id="canvases" class="canvases">
+      <canvas id="gl"></canvas>
+      <canvas id="overlay"></canvas>
+      <div id="splitter" class="splitter" role="separator" aria-label="Resize spectrum and waterfall"></div>
+      <div id="message" class="message" hidden><p id="message-text"></p><button id="take-over" type="button" hidden>Use this browser</button></div>
+    </div>
+    <div class="sliders">
+      <label>Zoom<input id="zoom" class="vertical" type="range" min="0" max="1000" value="0"></label>
+      <label>Contrast<input id="contrast" class="vertical" type="range" min="-50" max="50" value="0"></label>
+      <label>Range<input id="range" class="vertical" type="range" min="10" max="200" value="80"></label>
+      <label>Offset<input id="offset" class="vertical" type="range" min="-160" max="20" value="-20"></label>
+    </div>
+  </section>
+</main>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+</body>
+</html>

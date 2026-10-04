@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.5,<6.0"
+  morsemicro/halow:
+    version: "==2.11.2-esp32-2"
+  espressif/esp-dsp:
+    version: "==1.8.2"

@@ -1,0 +1,32 @@
+dependencies:
+  espressif/esp-dsp:
+    component_hash: ed9ac175b14e0414399a2b33c525579414b5bad19a2a67b12ea212def96f9a98
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.2
+  idf:
+    source:
+      type: idf
+    version: 5.5.5
+  morsemicro/halow:
+    component_hash: a84e6831f1067d874ed55eb8a9e7bffb469539b706f1a7197fc4eb2cf8680c8a
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.4.4,<6.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.11.2-esp32-2
+direct_dependencies:
+- espressif/esp-dsp
+- idf
+- morsemicro/halow
+manifest_hash: 32d8584e8a7cd874d96ff2055d229d3dde9e289a15908a108a1bb5d8e3f58a3a
+target: esp32s3
+version: 2.0.0
