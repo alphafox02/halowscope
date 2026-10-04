@@ -391,6 +391,12 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
         count_frame(last_frame);
     }
 
+    /* Pace the frame first, so the coverage covers the whole frame interval,
+     * including the wait when a fixed averaging count finished early. */
+    int64_t left = deadline - esp_timer_get_time();
+    if (left > 1000)
+        vTaskDelay(pdMS_TO_TICKS(left / 1000));
+
     int64_t elapsed = esp_timer_get_time() - start;
     xSemaphoreTake(status_lock, portMAX_DELAY);
     status.centre_hz = radio_settings()->lo_hz;
@@ -400,10 +406,6 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
     status.snapshot_us = snapshot_us;
     status.failures += failures;
     xSemaphoreGive(status_lock);
-
-    int64_t left = deadline - esp_timer_get_time();
-    if (left > 1000)
-        vTaskDelay(pdMS_TO_TICKS(left / 1000));
 }
 
 /* One sweep: LO steps across [start, stop], one frame for all of it. */

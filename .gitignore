@@ -4,3 +4,6 @@ backup/
 
 # Vendor documents, linked from the README instead.
 docs/*.pdf
+
+# Editor settings
+.vscode/
