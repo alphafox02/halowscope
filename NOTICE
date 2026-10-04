@@ -1,0 +1,40 @@
+HaLowScope
+Copyright 2026 CEMAXECUTER LLC, released under the 0BSD license (LICENSE).
+
+Parts of this firmware come from other projects:
+
+eSpDR
+  https://github.com/h0m3us3r/eSpDR, with receiver work from
+  https://github.com/alphafox02/eSpDR. Zero-Clause BSD.
+  firmware/main/radio.c and radio.h are adapted from its esp32s3/src/radio.c,
+  snapshot.c and board.h. firmware/web/ is its iqstream web page, adapted:
+  render.js and style.css largely as they are, app.js and index.html with a
+  sweep mode and a device panel added and the FPGA and stream panels removed.
+  The WebSocket protocol in firmware/main/web.c follows that page's.
+
+The build also uses these components, which the ESP-IDF component manager
+downloads; none of their files are in this repository:
+
+morsemicro/halow (Morse Micro Wi-Fi HaLow for ESP-IDF)
+  https://components.espressif.com/components/morsemicro/halow
+  Its ESP-IDF glue is Apache-2.0, but it builds in parts under other
+  licenses (see its components/mm-iot-sdk/LICENSES):
+  - morselib, the HaLow driver and MAC: GPL-3.0-or-later, or Morse Micro's
+    free commercial license, which has to be signed at morsemicro.com.
+  - the MM6108 firmware and board configuration files: the Morse Micro
+    Binary Distribution License Agreement, which allows redistribution,
+    unmodified, for use with Morse Micro Wi-Fi HaLow chips.
+
+  So a firmware image built from this project contains morselib. Building
+  one for your own board is fine; distributing built images to others
+  means complying with GPL-3.0 for the image or holding Morse Micro's
+  commercial license, plus shipping the binary distribution license with
+  it. This project publishes source only.
+
+espressif/esp-dsp
+  https://components.espressif.com/components/espressif/esp-dsp
+  Apache-2.0.
+
+ESP-IDF
+  https://github.com/espressif/esp-idf
+  Apache-2.0, with other licenses for some of its components.

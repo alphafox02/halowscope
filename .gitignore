@@ -1,0 +1,6 @@
+# Flash backups and dumps of a board stay on that board's owner's disk.
+backup/
+/*.bin
+
+# Vendor documents, linked from the README instead.
+docs/*.pdf
