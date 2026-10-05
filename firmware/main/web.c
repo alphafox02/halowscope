@@ -48,6 +48,7 @@
 #include "halowscope.h"
 #include "radio.h"
 #include "spectrum.h"
+#include "storage.h"
 
 static const char *TAG = "web";
 
@@ -332,6 +333,22 @@ static void send_status(int fd)
     cJSON_AddBoolToObject(sw, "on", s.sweep.on);
     cJSON_AddNumberToObject(sw, "start", s.sweep.start_hz);
     cJSON_AddNumberToObject(sw, "stop", s.sweep.stop_hz);
+
+    struct storage_status st;
+    storage_status(&st);
+    cJSON *sd = cJSON_AddObjectToObject(j, "card");
+    cJSON_AddBoolToObject(sd, "mounted", st.mounted);
+    if (st.mounted) {
+        cJSON_AddStringToObject(sd, "name", st.name);
+        cJSON_AddNumberToObject(sd, "size_mb", st.size_mb);
+        cJSON_AddNumberToObject(sd, "total_mb", st.total_mb);
+        cJSON_AddNumberToObject(sd, "free_mb", st.free_mb);
+        cJSON_AddNumberToObject(sd, "clock_khz", st.clock_khz);
+        cJSON_AddBoolToObject(sd, "tested", st.tested);
+        cJSON_AddBoolToObject(sd, "test_ok", st.test_ok);
+        cJSON_AddNumberToObject(sd, "write_kbps", st.write_kbps);
+        cJSON_AddNumberToObject(sd, "read_kbps", st.read_kbps);
+    }
 
     cJSON *d = cJSON_AddObjectToObject(j, "device");
     cJSON_AddStringToObject(d, "ip", ip);

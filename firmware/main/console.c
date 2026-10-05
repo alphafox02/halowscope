@@ -5,6 +5,7 @@
  *   AT+CWJAP="ssid","passphrase"   store the HaLow network and join it
  *   AT+CWJAP?                      show the stored SSID and the link state
  *   AT+RST                         restart
+ *   AT+SDFORMAT=YES                erase and format the whole TF card
  */
 
 #include <stdio.h>
@@ -14,6 +15,7 @@
 #include "driver/uart.h"
 #include "esp_system.h"
 #include "halowscope.h"
+#include "storage.h"
 
 #define UART UART_NUM_0
 #define CMD_MAX 200
@@ -78,6 +80,8 @@ static void command(char *line)
         fflush(stdout);
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
+    } else if (strcmp(line, "AT+SDFORMAT=YES") == 0) {
+        printf(storage_format() == ESP_OK ? "OK\n" : "ERROR formatting the card\n");
     } else if (strcasecmp(line, "AT") == 0) {
         printf("OK\n");
     } else if (n) {

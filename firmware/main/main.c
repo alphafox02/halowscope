@@ -10,6 +10,7 @@
 #include "nvs_flash.h"
 #include "halowscope.h"
 #include "spectrum.h"
+#include "storage.h"
 
 static const char *TAG = "halowscope";
 
@@ -27,5 +28,6 @@ void app_main(void)
     hs_link_start();
     hs_web_start();
     spectrum_start();
+    storage_start();
     ESP_LOGI(TAG, "Ready");
 }

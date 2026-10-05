@@ -43,3 +43,6 @@ CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n
 
 # Spectrum FFTs up to 8192 points (a 16384-pair snapshot holds two).
 CONFIG_DSP_MAX_FFT_SIZE_8192=y
+
+# Long file names on the TF card.
+CONFIG_FATFS_LFN_HEAP=y
