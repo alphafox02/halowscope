@@ -26,6 +26,7 @@
     <span id="pill-link" class="pill" title="Connection to the server">connecting</span>
     <span id="pill-state" class="pill" title="Stream">&hellip;</span>
     <span id="pill-errors" class="pill" title="HaLow signal at the board">&hellip;</span>
+    <button id="live-btn" class="pill live-btn" type="button" hidden title="Back to the live view (End)">&#9654; Back to live</button>
   </div>
 </header>
 
@@ -102,7 +103,9 @@
       <div class="row check"><label><input id="peak-hold" type="checkbox"> Peak hold</label>
         <button id="peak-reset" type="button" class="small">Reset</button></div>
       <div class="row buttons"><button id="auto-levels" type="button">Auto levels</button><button id="clear-waterfall" type="button">Clear waterfall</button></div>
-      <p class="note">Wheel or pinch to zoom, drag to pan, click to place a marker (right-click removes it), double-click to tune there. Keys: + &minus; 0 &larr; &rarr;.</p>
+      <div class="row check"><label><input id="rail-pinned" type="checkbox"> Keep the time rail visible</label></div>
+      <p class="note">Wheel or pinch to zoom, drag sideways to pan, click to place a marker (right-click removes it), double-click to tune there. Keys: + &minus; 0 &larr; &rarr;.</p>
+      <p class="note">Going back in time: drag the waterfall up or down, or scroll over the time rail on its left edge (Ctrl + wheel there zooms time). Click the rail's thin strip to jump. End or <b>Back to live</b> returns. The board keeps about the last seven minutes.</p>
     </details>
 
     <details id="panel-device" data-panel="device">

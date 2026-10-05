@@ -16,12 +16,20 @@
  *     run    {v: bool}
  *     ping   {c}                       answered by pong {c, s}
  *     ack    {seq}                     frame received
+ *     history  {id, top, row_ms, rows, start, stop, bins}  past rows
+ *     overview {id, rows, groups, start, stop}  the whole history, averaged
  *   board -> browser
  *     hello, status, notice, pong (JSON), and spectrum frames (binary):
  *       u8 1, u8 flags (1: peak detector), u16 bins, u32 sequence,
  *       f64 start Hz, f64 stop Hz, f32 base dB, f32 step dB, u32 frames
  *       merged, u32 0, f64 time (ms), then one byte per bin:
  *       dB = base + code * step.
+ *     History rows (type 2) and the overview (type 3), in chunks:
+ *       u8 type, u8 flags (1: last chunk), u16 bins, u32 id, f64 start Hz,
+ *       f64 stop Hz, f32 base dB, f32 step dB, u16 first row, u16 rows in
+ *       this chunk, u16 rows in all, u16 0, f64 top (ms), f64 ms per row,
+ *       then rows x bins bytes, newest row first: 0 for no data, otherwise
+ *       dB = base + (code - 1) * step.
  *
  * One browser at a time: a new connection takes over and the old one is
  * closed with code 4001. At most two frames are in flight; frames produced
@@ -49,6 +57,7 @@
 #include "radio.h"
 #include "spectrum.h"
 #include "storage.h"
+#include "history.h"
 
 static const char *TAG = "web";
 
@@ -87,6 +96,7 @@ static double now_ms(void) { return esp_timer_get_time() / 1000.0; }
 struct outgoing {
     int fd;
     httpd_ws_type_t type;
+    SemaphoreHandle_t sent;   /* given once sent, if set */
     size_t len;
     uint8_t data[];
 };
@@ -99,20 +109,31 @@ static void send_work(void *arg)
         httpd_ws_send_frame_async(server, o->fd, &f);
     if (o->type == HTTPD_WS_TYPE_CLOSE)
         httpd_sess_trigger_close(server, o->fd);
+    if (o->sent)
+        xSemaphoreGive(o->sent);
     free(o);
+}
+
+static bool queue_frame_signal(int fd, httpd_ws_type_t type, const void *data, size_t len, SemaphoreHandle_t sent)
+{
+    struct outgoing *o = malloc(sizeof(*o) + len);
+    if (!o)
+        return false;
+    o->fd = fd;
+    o->type = type;
+    o->sent = sent;
+    o->len = len;
+    memcpy(o->data, data, len);
+    if (httpd_queue_work(server, send_work, o) != ESP_OK) {
+        free(o);
+        return false;
+    }
+    return true;
 }
 
 static void queue_frame(int fd, httpd_ws_type_t type, const void *data, size_t len)
 {
-    struct outgoing *o = malloc(sizeof(*o) + len);
-    if (!o)
-        return;
-    o->fd = fd;
-    o->type = type;
-    o->len = len;
-    memcpy(o->data, data, len);
-    if (httpd_queue_work(server, send_work, o) != ESP_OK)
-        free(o);
+    queue_frame_signal(fd, type, data, len, NULL);
 }
 
 static void send_text(int fd, const char *text)
@@ -350,6 +371,15 @@ static void send_status(int fd)
         cJSON_AddNumberToObject(sd, "read_kbps", st.read_kbps);
     }
 
+    struct history_span hs;
+    history_span(&hs);
+    cJSON *hi = cJSON_AddObjectToObject(j, "history");
+    cJSON_AddNumberToObject(hi, "oldest", hs.oldest_ms);
+    cJSON_AddNumberToObject(hi, "newest", hs.newest_ms);
+    cJSON_AddNumberToObject(hi, "lines", hs.lines);
+    cJSON_AddNumberToObject(hi, "capacity", hs.capacity);
+    cJSON_AddNumberToObject(hi, "line_ms", hs.line_ms);
+
     cJSON *d = cJSON_AddObjectToObject(j, "device");
     cJSON_AddStringToObject(d, "ip", ip);
     cJSON_AddNumberToObject(d, "rssi", hs_link_rssi());
@@ -427,6 +457,135 @@ static void on_sweep(const cJSON *j)
     spectrum_set_sweep(&c);
 }
 
+/* ---- history ---------------------------------------------------------------------- */
+
+/* The latest request of each kind; a newer one replaces one not yet served. */
+struct history_request {
+    bool want, overview;
+    int fd;
+    uint32_t id;
+    double top_ms, row_ms, start_hz, stop_hz;
+    unsigned rows, bins;
+};
+static struct history_request wanted[2];   /* 0: rows, 1: overview */
+static SemaphoreHandle_t history_lock, history_sent;
+static TaskHandle_t history_task_handle;
+
+#define HISTORY_MAX_ROWS 2048u
+#define HISTORY_MAX_BINS 1024u
+#define HISTORY_CHUNK_ROWS 16u
+#define HISTORY_HEADER 56u
+
+static void on_history(int fd, const cJSON *j, bool overview)
+{
+    struct history_request r = { .want = true, .overview = overview, .fd = fd };
+    r.id = (uint32_t)number(j, "id", 0);
+    r.start_hz = number(j, "start", 0);
+    r.stop_hz = number(j, "stop", 0);
+    double rows = number(j, "rows", 0), bins = number(j, overview ? "groups" : "bins", 0);
+    if (rows < 1 || bins < 1 || r.stop_hz <= r.start_hz)
+        return;
+    r.rows = rows > HISTORY_MAX_ROWS ? HISTORY_MAX_ROWS : (unsigned)rows;
+    r.bins = bins > HISTORY_MAX_BINS ? HISTORY_MAX_BINS : (unsigned)bins;
+    if (overview) {
+        struct history_span s;
+        history_span(&s);
+        r.top_ms = s.newest_ms;
+        r.row_ms = (s.newest_ms - s.oldest_ms + s.line_ms) / r.rows;
+    } else {
+        r.top_ms = number(j, "top", 0);
+        r.row_ms = number(j, "row_ms", 0);
+    }
+    if (r.row_ms <= 0)
+        return;
+    xSemaphoreTake(history_lock, portMAX_DELAY);
+    wanted[overview] = r;
+    xSemaphoreGive(history_lock);
+    xTaskNotifyGive(history_task_handle);
+}
+
+/* Builds the rows a chunk at a time and sends each chunk, one in flight. */
+static void serve_history(const struct history_request *r)
+{
+    float *rows = heap_caps_malloc(HISTORY_CHUNK_ROWS * r->bins * sizeof(float), MALLOC_CAP_SPIRAM);
+    uint8_t *msg = heap_caps_malloc(HISTORY_HEADER + HISTORY_CHUNK_ROWS * r->bins, MALLOC_CAP_SPIRAM);
+    if (!rows || !msg)
+        goto done;
+    for (unsigned row0 = 0; row0 < r->rows; row0 += HISTORY_CHUNK_ROWS) {
+        unsigned n = r->rows - row0 < HISTORY_CHUNK_ROWS ? r->rows - row0 : HISTORY_CHUNK_ROWS;
+        double top = r->top_ms - row0 * r->row_ms;
+        history_rows(top, r->row_ms, n, r->start_hz, r->stop_hz, r->bins, r->overview, rows);
+        float low = INFINITY, high = -INFINITY;
+        for (unsigned i = 0; i < n * r->bins; i++) {
+            if (isnan(rows[i]))
+                continue;
+            low = fminf(low, rows[i]);
+            high = fmaxf(high, rows[i]);
+        }
+        float base = isinf(low) ? 0 : fmaxf(low, high - 254 * DB_STEP), step = DB_STEP;
+        uint16_t first = row0, count = n, total = r->rows, zero = 0;
+        uint16_t bins = r->bins;
+        msg[0] = r->overview ? 3 : 2;
+        msg[1] = row0 + n >= r->rows ? 1 : 0;
+        memcpy(msg + 2, &bins, 2);
+        memcpy(msg + 4, &r->id, 4);
+        memcpy(msg + 8, &r->start_hz, 8);
+        memcpy(msg + 16, &r->stop_hz, 8);
+        memcpy(msg + 24, &base, 4);
+        memcpy(msg + 28, &step, 4);
+        memcpy(msg + 32, &first, 2);
+        memcpy(msg + 34, &count, 2);
+        memcpy(msg + 36, &total, 2);
+        memcpy(msg + 38, &zero, 2);
+        memcpy(msg + 40, &r->top_ms, 8);
+        memcpy(msg + 48, &r->row_ms, 8);
+        for (unsigned i = 0; i < n * r->bins; i++) {
+            if (isnan(rows[i])) {
+                msg[HISTORY_HEADER + i] = 0;
+                continue;
+            }
+            float c = roundf((rows[i] - base) / DB_STEP) + 1;
+            msg[HISTORY_HEADER + i] = c < 1 ? 1 : c > 255 ? 255 : (uint8_t)c;
+        }
+        if (r->fd != client_fd)
+            break;
+        xSemaphoreTake(history_sent, 0);
+        if (!queue_frame_signal(r->fd, HTTPD_WS_TYPE_BINARY, msg, HISTORY_HEADER + n * r->bins, history_sent))
+            break;
+        xSemaphoreTake(history_sent, pdMS_TO_TICKS(5000));
+        /* A newer request for the same kind wins over the rest of this one. */
+        xSemaphoreTake(history_lock, portMAX_DELAY);
+        bool superseded = wanted[r->overview].want;
+        xSemaphoreGive(history_lock);
+        if (superseded)
+            break;
+    }
+done:
+    heap_caps_free(rows);
+    heap_caps_free(msg);
+}
+
+static void history_task(void *arg)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        for (;;) {
+            struct history_request r = { 0 };
+            xSemaphoreTake(history_lock, portMAX_DELAY);
+            /* The overview first: it is small and the rail needs it. */
+            for (int k = 1; k >= 0 && !r.want; k--)
+                if (wanted[k].want) {
+                    r = wanted[k];
+                    wanted[k].want = false;
+                }
+            xSemaphoreGive(history_lock);
+            if (!r.want)
+                break;
+            serve_history(&r);
+        }
+    }
+}
+
 static void on_message(int fd, const char *text)
 {
     cJSON *j = cJSON_Parse(text);
@@ -471,6 +630,8 @@ static void on_message(int fd, const char *text)
         on_fft(j);
     } else if (strcmp(type, "sweep") == 0) {
         on_sweep(j);
+    } else if (strcmp(type, "history") == 0 || strcmp(type, "overview") == 0) {
+        on_history(fd, j, strcmp(type, "overview") == 0);
     } else if (strcmp(type, "run") == 0) {
         spectrum_run(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "v")));
     }
@@ -600,4 +761,7 @@ void hs_web_start(void)
                        .ws_post_handshake_cb = ws_connected };
     httpd_register_uri_handler(server, &ws);
     xTaskCreate(status_task, "wsstatus", 4096, NULL, 2, NULL);
+    history_lock = xSemaphoreCreateMutex();
+    history_sent = xSemaphoreCreateBinary();
+    xTaskCreate(history_task, "history", 4096, NULL, 2, &history_task_handle);
 }

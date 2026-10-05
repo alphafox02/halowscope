@@ -230,6 +230,24 @@ export class Renderer {
                          new Float32Array([start - REFERENCE_HZ, stop - REFERENCE_HZ, bins, 1]));
     }
 
+    // Writes a row `age` rows below the newest one without moving the
+    // waterfall (for history arriving after the rows above it).
+    putRow(age, db, start, stop, time) {
+        if (age < 0 || age >= this.textureHeight) return;
+        const gl = this.gl, bins = Math.min(db.length, this.textureWidth);
+        const ring = (this.head - age + this.textureHeight) % this.textureHeight;
+        this.filled = Math.max(this.filled, age + 1);
+        this.rowTimes[ring] = time;
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, this.rowsTexture);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, ring, bins, 1, gl.RED, gl.FLOAT,
+                         db.length > bins ? db.subarray(0, bins) : db);
+        gl.activeTexture(gl.TEXTURE3);
+        gl.bindTexture(gl.TEXTURE_2D, this.metaTexture);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, ring, 1, 1, gl.RGBA, gl.FLOAT,
+                         new Float32Array([start - REFERENCE_HZ, stop - REFERENCE_HZ, bins, 1]));
+    }
+
     // The time of the row `age` rows back, or 0.
     rowTime(age) {
         if (age < 0 || age >= this.filled) return 0;

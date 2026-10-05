@@ -30,6 +30,7 @@
 #include "dsps_wind.h"
 #include "radio.h"
 #include "web.h"
+#include "history.h"
 
 static const char *TAG = "spectrum";
 
@@ -451,6 +452,7 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
         t_db = esp_timer_get_time();
         double lo = radio_settings()->lo_hz;
         web_publish(line, n, lo - rate / 2, lo + rate / 2, c->peak);
+        history_record(line, n, lo - rate / 2, lo + rate / 2, c->peak);
         t_pub = esp_timer_get_time();
         count_frame(last_frame);
         float cost = (float)(t_pub - work_end);
@@ -571,6 +573,7 @@ static void sweep_frame(const struct fft_config *c, const struct sweep_config *s
             return;
     }
     web_publish(line, total, frame_start, frame_start + total * bin_hz, c->peak);
+    history_record(line, total, frame_start, frame_start + total * bin_hz, c->peak);
     count_frame(last_frame);
 
     xSemaphoreTake(status_lock, portMAX_DELAY);

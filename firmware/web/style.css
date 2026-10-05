@@ -230,3 +230,6 @@ dl.stats dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; 
     .sliders { width: 40px; }
     .sliders label { font-size: 9px; }
 }
+
+.live-btn { cursor: pointer; color: var(--warn); border-color: #6b4c1a; background: transparent; font: inherit; font-size: 12px; }
+.live-btn:hover { background: #2a2010; }

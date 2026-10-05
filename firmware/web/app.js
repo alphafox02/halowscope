@@ -22,6 +22,7 @@ const DEFAULTS = {
     waterfallAttack: 1.0, waterfallDecay: 0.9,
     palette: 'sdrsharp', fill: true, peakHold: false, channels: 'none',
     split: 0.42, maxFps: 0, maxKbps: 0, maxBins: -1,  // -1: automatic resolution
+    railPinned: false,                       // keep the time rail on the waterfall's edge
     sidebar: window.innerWidth > 900,
     open: {sweep: true, receiver: true, fft: false, display: false, device: true, link: false},
 };
@@ -101,7 +102,9 @@ function connect() {
             onMessage(JSON.parse(event.data));
         } else {
             stats.bytes += event.data.byteLength;
-            onFrame(event.data);
+            const kind = new DataView(event.data).getUint8(0);
+            if (kind === 1) onFrame(event.data);
+            else onHistory(event.data);
         }
     };
     ws.onclose = (event) => {
@@ -176,6 +179,7 @@ function onFrame(buffer) {
     if (d.getUint8(0) !== 1) return;
     const peakMode = d.getUint8(1) & 1, bins = d.getUint16(2, true), sequence = d.getUint32(4, true);
     send({t: 'ack', seq: sequence});
+    if (hist.paused) return;   // the waterfall shows the past; the board records on
     const start = d.getFloat64(8, true), stop = d.getFloat64(16, true);
     const base = d.getFloat32(24, true), step = d.getFloat32(28, true);
     const merged = d.getUint32(32, true), time = d.getFloat64(40, true);
@@ -205,11 +209,255 @@ function onFrame(buffer) {
     waterfall.key = key;
     waterfall.row = row;
     renderer.pushRow(row, start, stop, time);
+    hist.liveShift++;
+    hist.liveTop = time;
 
     stats.frames++;
     stats.merged += merged - 1;
     stats.age = performance.timeOrigin + performance.now() + link.clockOffset - time;
     dirty.plot = true;
+}
+
+// ---- history: scrolling back in time ----------------------------------------------------------------
+//
+// The board keeps the last several minutes of spectrum lines. Live, the
+// waterfall shows frames as they arrive. Scrolling back pauses it and asks
+// the board for the rows of the window in view (one per screen pixel row,
+// newest first, merged by max-hold); they are drawn as they arrive. A rail
+// on the waterfall's left edge, shown when the pointer comes near, gives the
+// time and an overview strip of everything kept.
+
+const RAIL = 52, RAIL_RULER = 38;          // CSS pixels: the rail, and its label part
+const hist = {
+    paused: false, top: 0, rowMs: 100,     // while paused: server time of the top row, and per row
+    liveTop: 0, liveShift: 0,              // newest live frame; live rows pushed since a fill
+    want: null, id: 0, rows: [], start: 0, stop: 0, bins: 0, timer: 0,
+    overview: null, ovRows: 0, ovGroups: 0, ovTop: 0, ovRowMs: 0, ovAsked: 0, ovPending: null,
+};
+// The board's clock: its newest frame, or its newest history line.
+const boardNow = () => Math.max(hist.liveTop, historyInfo() ? historyInfo().newest : 0);
+const historyInfo = () => (status && status.history && status.history.lines ? status.history : null);
+const liveRowMs = () => (stats.dataFps > 1 ? 1000 / stats.dataFps : 50);
+const currentRowMs = () => (hist.paused ? hist.rowMs : liveRowMs());
+const wfRows = () => Math.max(1, Math.floor(layout().waterfall));
+
+// The rail sits over the waterfall's left edge.
+function railVisible() {
+    if (prefs.railPinned || hist.paused || (drag && drag.strip)) return true;
+    const l = layout();
+    return pointer.inside && pointer.x < RAIL + 24 && pointer.y > l.spectrum + l.axis;
+}
+function inRail(p) {
+    const l = layout();
+    return railVisible() && p.x < RAIL && p.y > l.spectrum + l.axis;
+}
+const inStrip = (p) => inRail(p) && p.x >= RAIL_RULER;
+
+function requestHistory(now = false) {
+    clearTimeout(hist.timer);
+    hist.timer = setTimeout(sendHistory, now ? 0 : 150);
+}
+function sendHistory() {
+    if (link.state !== 'live' || !historyInfo()) return;
+    const v = visible(), rows = wfRows();
+    const bins = clamp(Math.round(canvases.clientWidth), 64, 1024);
+    const want = {id: ++hist.id, top: hist.paused ? hist.top : boardNow(), rowMs: currentRowMs(), rows,
+                  start: v.start, stop: v.stop, bins};
+    hist.want = want;
+    hist.rows = new Array(rows).fill(null);
+    hist.liveShift = 0;
+    renderer.clearWaterfall();
+    waterfall.key = '';
+    send({t: 'history', id: want.id, top: want.top, row_ms: want.rowMs, rows, start: want.start, stop: want.stop,
+          bins});
+    dirty.plot = dirty.overlay = true;
+}
+function requestOverview() {
+    const v = visible();
+    if (!historyInfo() || link.state !== 'live') return;
+    hist.ovAsked = performance.now();
+    send({t: 'overview', id: ++hist.id, rows: wfRows(), groups: 12, start: v.start, stop: v.stop});
+}
+
+function onHistory(buffer) {
+    const d = new DataView(buffer);
+    const type = d.getUint8(0), last = d.getUint8(1) & 1, bins = d.getUint16(2, true), id = d.getUint32(4, true);
+    const start = d.getFloat64(8, true), stop = d.getFloat64(16, true);
+    const base = d.getFloat32(24, true), step = d.getFloat32(28, true);
+    const row0 = d.getUint16(32, true), n = d.getUint16(34, true), total = d.getUint16(36, true);
+    const top = d.getFloat64(40, true), rowMs = d.getFloat64(48, true);
+    const codes = new Uint8Array(buffer, 56);
+    const level = (c) => (c ? base + (c - 1) * step : NO_DATA);
+
+    if (type === 3) {                        // overview of everything kept
+        if (row0 === 0) hist.ovPending = new Float32Array(total * bins);
+        if (!hist.ovPending || hist.ovPending.length !== total * bins) return;
+        for (let i = 0; i < n * bins; i++) hist.ovPending[row0 * bins + i] = level(codes[i]);
+        if (last) {
+            Object.assign(hist, {overview: hist.ovPending, ovRows: total, ovGroups: bins, ovTop: top, ovRowMs: rowMs});
+            hist.ovPending = null;
+            dirty.overlay = true;
+        }
+        return;
+    }
+    if (type !== 2 || !hist.want || id !== hist.want.id) return;   // a newer window was asked for
+    Object.assign(hist, {start, stop, bins});
+    for (let r = 0; r < n; r++) {
+        const row = new Float32Array(bins);
+        let any = false;
+        for (let i = 0; i < bins; i++) {
+            const c = codes[r * bins + i];
+            row[i] = level(c);
+            if (c) any = true;
+        }
+        hist.rows[row0 + r] = any ? row : null;
+    }
+    // Lines are stored about every 150 ms and rows can be finer: an empty row
+    // repeats the nearest one above it.
+    let above = null;
+    for (let r = row0 - 1; r >= 0 && !above; r--) above = hist.rows[r];
+    const empty = new Float32Array(bins).fill(NO_DATA);
+    for (let r = row0; r < row0 + n; r++) {
+        if (hist.rows[r]) above = hist.rows[r];
+        renderer.putRow(r + hist.liveShift, above || empty, start, stop, top - r * rowMs);
+    }
+    dirty.plot = dirty.overlay = true;
+}
+
+// Moving in time; `ms` > 0 goes towards now.
+function scrollTime(ms) {
+    if (!historyInfo() || ms === 0) return;
+    const from = hist.paused ? hist.top : boardNow();
+    if (!hist.paused) hist.rowMs = Math.max(liveRowMs(), historyInfo().line_ms);
+    showTime(from + ms);
+}
+function zoomTime(factor) {
+    const info = historyInfo();
+    if (!info) return;
+    const rows = wfRows();
+    const centre = (hist.paused ? hist.top : boardNow()) - (rows * currentRowMs()) / 2;
+    const most = Math.max(info.line_ms, ((info.newest - info.oldest) / rows) * 1.05);
+    hist.rowMs = clamp(currentRowMs() * factor, Math.min(info.line_ms, liveRowMs()), most);
+    showTime(centre + (rows * hist.rowMs) / 2);
+}
+function jumpToStrip(y) {
+    const info = historyInfo(), l = layout();
+    if (!info) return;
+    const t = info.newest - clamp((y - l.spectrum - l.axis) / l.waterfall, 0, 1) * (info.newest - info.oldest);
+    if (!hist.paused) hist.rowMs = Math.max(liveRowMs(), info.line_ms);
+    showTime(t + (wfRows() * hist.rowMs) / 2);
+}
+// Shows the window whose top row is at `top`, or live once that reaches now.
+function showTime(top) {
+    const info = historyInfo();
+    if (!info) return;
+    if (top >= info.newest - hist.rowMs) {
+        goLive();
+        return;
+    }
+    // Keep at least a quarter of the screen on recorded history.
+    hist.top = Math.max(top, Math.min(info.newest, info.oldest + wfRows() * hist.rowMs * 0.25));
+    const wasPaused = hist.paused;
+    hist.paused = true;
+    if (!wasPaused) {
+        sendView();
+        requestOverview();
+    }
+    showPaused();
+    requestHistory();
+}
+function goLive() {
+    const was = hist.paused;
+    hist.paused = false;
+    showPaused();
+    if (was) {
+        sendView();
+        requestHistory(true);      // refill the waterfall with the recent past, then carry on live
+    }
+}
+function showPaused() {
+    $('live-btn').hidden = !hist.paused;
+    dirty.plot = dirty.overlay = true;
+}
+$('live-btn').addEventListener('click', goLive);
+
+// While paused, the spectrum shows the hovered row (or the top one).
+function pausedSpectrum() {
+    const l = layout();
+    let age = 0;
+    if (pointer.inside && pointer.y > l.spectrum + l.axis) age = Math.floor(pointer.y - l.spectrum - l.axis);
+    let row = null;
+    for (let r = Math.min(age, hist.rows.length - 1); r >= 0 && !row; r--) row = hist.rows[r];
+    if (!row) return;
+    Object.assign(spectrum, {key: 'history', start: hist.start, stop: hist.stop, bins: hist.bins,
+                             display: row, target: row, peak: row, settled: true});
+}
+
+const ago = (ms) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s === 0) return 'now';
+    return s < 60 ? `-${s} s` : `-${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+function paletteColour(t) {
+    const stops = PALETTES[prefs.palette] || PALETTES.sdrsharp;
+    const x = clamp(t, 0, 1) * (stops.length - 1), k = Math.min(Math.floor(x), stops.length - 2), f = x - k;
+    const c = (hex, i) => parseInt(hex.slice(2 * i, 2 * i + 2), 16);
+    return `rgb(${[0, 1, 2].map((i) => Math.round(c(stops[k], i) * (1 - f) + c(stops[k + 1], i) * f)).join(',')})`;
+}
+
+function drawRail(ctx, l) {
+    const y0 = l.spectrum + l.axis, h = l.waterfall, info = historyInfo();
+    ctx.fillStyle = 'rgba(7, 9, 12, 0.86)';
+    ctx.fillRect(0, y0, RAIL, h);
+    ctx.fillStyle = 'rgba(61, 155, 255, 0.6)';
+    ctx.fillRect(RAIL, y0, 1, h);
+    const now = boardNow();
+    const top = hist.paused ? hist.top : now, rowMs = currentRowMs();
+    // Time labels down the waterfall.
+    const step = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600].find((s) => (s * 1000) / rowMs >= 44) || 600;
+    ctx.font = '10.5px system-ui, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    const ageTop = Math.max(0, now - top);
+    for (let a = Math.ceil(ageTop / 1000 / step) * step; ; a += step) {
+        const y = y0 + (a * 1000 - ageTop) / rowMs;
+        if (y > y0 + h - 4) break;
+        if (y < y0 + 16) continue;
+        ctx.fillStyle = 'rgba(160, 180, 200, 0.5)';
+        ctx.fillRect(RAIL_RULER - 5, Math.round(y), 5, 1);
+        ctx.fillStyle = 'rgba(200, 210, 220, 0.85)';
+        ctx.fillText(ago(a * 1000), RAIL_RULER - 7, y);
+    }
+    ctx.fillStyle = hist.paused ? '#f5b041' : '#3ecf8e';
+    ctx.fillText(hist.paused ? ago(ageTop) : 'now', RAIL_RULER - 7, y0 + 8);
+    if (!info) return;
+    // Overview strip: everything kept, newest at the top, refreshed every few seconds.
+    if (performance.now() - hist.ovAsked > 5000) requestOverview();
+    const sx = RAIL_RULER + 1, sw = RAIL - RAIL_RULER - 2, total = Math.max(1, info.newest - info.oldest);
+    if (hist.overview) {
+        // Coloured on the overview's own range, so quiet and busy stretches
+        // differ even when everything is above the waterfall's scale.
+        const values = hist.overview.filter((v) => v > NO_DATA).sort((a, b) => a - b);
+        const bottom = values.length ? values[Math.floor(values.length * 0.05)] : 0;
+        const span = values.length ? Math.max(3, values[values.length - 1] - bottom) : 1;
+        for (let y = 0; y < h; y++) {
+            const r = Math.floor((hist.ovTop - (info.newest - (y / h) * total)) / hist.ovRowMs);
+            if (r < 0 || r >= hist.ovRows) continue;
+            for (let g = 0; g < hist.ovGroups; g++) {
+                const v = hist.overview[r * hist.ovGroups + g];
+                if (v <= NO_DATA) continue;
+                const x0 = sx + Math.floor((g * sw) / hist.ovGroups), x1 = sx + Math.floor(((g + 1) * sw) / hist.ovGroups);
+                ctx.fillStyle = paletteColour((v - bottom) / span);
+                ctx.fillRect(x0, y0 + y, Math.max(1, x1 - x0), 1);
+            }
+        }
+    }
+    // Box: the part of the history on screen.
+    const yTop = clamp(y0 + ((now - top) / total) * h, y0, y0 + h - 3);
+    const yBottom = clamp(y0 + ((now - (top - h * rowMs)) / total) * h, y0, y0 + h);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(sx + 0.75, yTop, sw - 1.5, Math.max(3, yBottom - yTop));
 }
 
 // ---- view ----------------------------------------------------------------------------------------------
@@ -245,6 +493,7 @@ function setView(offset, span) {
     $('zoom').value = String(Math.round(1000 * (isFinite(zoom) ? zoom : 0)));
     dirty.plot = dirty.overlay = true;
     sendViewSoon();
+    if (hist.paused) requestHistory();
 }
 
 let viewTimer = 0;
@@ -265,7 +514,7 @@ function sendView() {
     }
     const limit = Math.min(renderer.textureWidth, maxBins, prefs.maxBins > 0 ? prefs.maxBins : Infinity);
     send({t: 'view', start, stop, bins: clamp(bins, 16, limit), auto: prefs.maxBins < 0,
-          fps: document.hidden ? 2 : prefs.maxFps, kbps: prefs.maxKbps});
+          fps: document.hidden || hist.paused ? 1 : prefs.maxFps, kbps: prefs.maxKbps});
 }
 
 function frequencyAt(x) {  // x in CSS pixels
@@ -310,6 +559,11 @@ canvases.addEventListener('wheel', (e) => {
     if (!onPlot(e)) return;
     e.preventDefault();
     const delta = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+    if (inRail(local(e))) {
+        if (e.ctrlKey || e.metaKey) zoomTime(Math.exp(delta * 0.002));
+        else scrollTime(-Math.sign(delta) * wfRows() * currentRowMs() * 0.1);
+        return;
+    }
     zoomAround(local(e).x, Math.exp(delta * 0.0015));
 }, {passive: false});
 
@@ -319,6 +573,10 @@ canvases.addEventListener('pointerdown', (e) => {
     const p = local(e);
     touches.set(e.pointerId, p);
     drag = touches.size === 1 ? {...p, moved: false, time: performance.now()} : null;
+    if (drag && inStrip(p)) {
+        drag.strip = true;
+        jumpToStrip(p.y);
+    }
 });
 canvases.addEventListener('pointermove', (e) => {
     const p = local(e);
@@ -326,6 +584,7 @@ canvases.addEventListener('pointermove', (e) => {
     pointer.y = p.y;
     pointer.inside = true;
     dirty.overlay = true;
+    if (hist.paused) dirty.plot = true;
     const touch = touches.get(e.pointerId);
     if (!touch) return;
     if (touches.size === 2) {
@@ -338,12 +597,21 @@ canvases.addEventListener('pointermove', (e) => {
         if (before > 20 && after > 20) zoomAround((c.x + d.x) / 2, before / after);
         return;
     }
-    const dx = p.x - touch.x;
+    const dx = p.x - touch.x, dy = p.y - touch.y;
     touch.x = p.x;
     touch.y = p.y;
-    if (drag && (drag.moved || Math.hypot(p.x - drag.x, p.y - drag.y) > 4)) {
+    if (drag && drag.strip) {
         drag.moved = true;
-        pan(dx);
+        jumpToStrip(p.y);
+    } else if (drag && (drag.moved || Math.hypot(p.x - drag.x, p.y - drag.y) > 4)) {
+        if (!drag.moved) {
+            // Up and down on the waterfall moves in time, sideways in frequency.
+            const l = layout();
+            drag.timeAxis = drag.y > l.spectrum + l.axis && Math.abs(p.y - drag.y) > Math.abs(p.x - drag.x);
+        }
+        drag.moved = true;
+        if (drag.timeAxis) scrollTime(dy * currentRowMs());
+        else pan(dx);
     }
 });
 function endPointer(e) {
@@ -405,6 +673,9 @@ document.addEventListener('keydown', (e) => {
     else if (e.key === 'ArrowLeft') pan(canvases.clientWidth / 8);
     else if (e.key === 'ArrowRight') pan(-canvases.clientWidth / 8);
     else if (e.key === 'Escape') { marker = null; dirty.overlay = true; }
+    else if (e.key === 'End') goLive();
+    else if (e.key === 'PageUp') scrollTime(-wfRows() * currentRowMs() * 0.8);
+    else if (e.key === 'PageDown') scrollTime(wfRows() * currentRowMs() * 0.8);
     else return;
     e.preventDefault();
 });
@@ -451,6 +722,7 @@ function animate(now) {
 
     // SDR#'s spectrum attack and decay are per FFT frame; applied here in
     // proportion to the time passed, the trace glides at the display rate.
+    if (hist.paused) pausedSpectrum();
     if (spectrum.target && !spectrum.settled) {
         const frames = dt * (status ? status.fft.rate : 40);
         const up = 1 - Math.pow(1 - prefs.spectrumAttack, frames), down = 1 - Math.pow(1 - prefs.spectrumDecay, frames);
@@ -650,6 +922,7 @@ function drawOverlay() {
         }
         label(text, pointer.x, clamp(pointer.y - 18, 12, h - 12), '#e8eef5');
     }
+    if (railVisible()) drawRail(ctx, l);
 }
 
 function showMessage(text, takeOver = false) {
@@ -703,6 +976,7 @@ function onStatus(m) {
         sendView();
     }
     if (!previous || previous.fft.size !== s.fft.size) setView(view.offset, view.span);
+    if ((!previous || !previous.history) && s.history && s.history.lines) requestHistory(true);
 
     // Top bar.
     $('run').textContent = s.running ? '■' : '▶';
@@ -834,6 +1108,7 @@ function showFrequency() {
 let tuneTimer = 0;
 // Retunes the LO. `centre`: also bring that frequency to the middle of the view.
 function tune(hz, centre = false) {
+    if (hist.paused) goLive();
     if (!status || !status.receiver || link.state !== 'live') {
         toast('The receiver is not available.', 'bad');
         return;
@@ -1134,6 +1409,7 @@ bindPreference('w-attack', 'waterfallAttack');
 bindPreference('w-decay', 'waterfallDecay');
 bindPreference('channels', 'channels');
 bindPreference('fill', 'fill');
+bindPreference('rail-pinned', 'railPinned');
 bindPreference('peak-hold', 'peakHold', () => { if (spectrum.target) spectrum.peak = spectrum.display.slice(); });
 bindPreference('contrast', 'contrast');
 bindPreference('range', 'range');
