@@ -114,7 +114,8 @@ idf.py -p /dev/ttyUSB0 flash
 This writes the bootloader, the partition table and the app. The NVS
 partition, where the stock firmware stores the HaLow network, stays where it
 is, so a board that already joined your network joins it again without
-setup.
+setup. HaLowScope goes into the factory slot; three more slots can hold
+other firmware (see [Firmware slots](#firmware-slots)).
 
 To go back to the stock firmware:
 
@@ -143,6 +144,8 @@ The board stores the network and joins it. Other commands:
 | `AT+CWJAP?` | stored network, link state and address |
 | `AT+RST` | restart |
 | `AT+SDFORMAT=YES` | erase the TF card and make one FAT32 partition across it |
+| `AT+BOOT?` | list the firmware slots (see [Firmware slots](#firmware-slots)) |
+| `AT+BOOT=<slot>[,KEEP]` | restart into a slot; `factory` is HaLowScope |
 
 The board takes its address by DHCP and prints it on the console:
 
@@ -193,6 +196,7 @@ desktop or phone browser).
 - **FFT**: resolution (512 to 8192 points), window, frame rate, averaging,
   average or peak detector, DC removal.
 - **Device**: HaLow signal strength, memory and capture timing.
+- **Detector**, **Outputs** and **Firmware**: see the sections below.
 
 One browser at a time controls the receiver; opening the page somewhere
 else takes over.
@@ -224,6 +228,91 @@ opened page shows the recent past in its waterfall straight away.
 Scrolling back asks the board for one row per screen line; over HaLow a
 full screen takes a few seconds to arrive and draws as it comes. History
 from the card loads more slowly than history in memory.
+
+## Detector
+
+The board watches for new emitters that stand out from what each frequency
+usually shows (a video link, a jammer) and reports them as events, with or
+without a page open.
+
+- Every frequency (in 250 kHz cells) learns its usual level. A signal that
+  stays longer than *Normal after* (5 minutes by default) becomes usual and
+  stops counting. For the first minute after start the board only learns.
+- A rule sets a range and what counts: at least *threshold* dB above usual,
+  at least *width* MHz wide, present in most lines (70 %) for at least the
+  set time. The default rule covers 2400 to 2483.5 MHz: 10 dB, 5 MHz, 2 s.
+  Three more rules (2.3 GHz, 2.5 to 2.7 GHz, custom) start switched off.
+- An event ends when the signal has been gone for 3 s, and reopens if the
+  same emitter comes back within 30 s.
+
+Each event gets a label from its shape and behaviour over its life:
+
+| Label | When |
+|---|---|
+| Wi-Fi-like | most sightings are 20 or 40 MHz wide on the Wi-Fi channel grid (2412 + 5k MHz) |
+| very wide (jammer-like) | 30 MHz or wider on average |
+| wandering (microwave-like) | the centre moves by more than 5 MHz (standard deviation) |
+| steady wideband (video-like) | present over 90 % of the time, with a steady width |
+| unclassified | none of these, or too few sightings |
+
+The labels describe what a signal looks like, not what it is: a Wi-Fi
+access point and a Wi-Fi video link look the same. The measured features
+(centre and width with their spread, duty, Wi-Fi share) go with every
+event, so better rules can be made from real recordings.
+
+Events show in the Detector panel (click one to see it in the waterfall),
+as a note when one starts and as marks on the time rail. With a TF card
+they are logged one JSON object per line to `halowscope/events.jsonl`.
+
+## Outputs
+
+Events can also go to other systems, set in the Outputs panel:
+
+- **MQTT**: one small JSON message per event start, update (every 10 s
+  while it lasts) and end, to `<topic>/event` (topic `halowscope` by
+  default) on a broker at port 1883. Plain MQTT, no TLS; a user and
+  password are optional, and the password is never shown again.
+- **Cursor on Target** for TAK clients, over UDP to a multicast group
+  (TAK's usual 239.2.3.1, port 6969) or one receiver's address. The node
+  appears once a minute as a sensor at its set position, and each event
+  as a marker at that position, cleared when it ends. CoT needs the
+  position. Some routers and Wi-Fi networks do not pass multicast on; if
+  TAK sees nothing, send to a receiver's address instead.
+
+## Firmware slots
+
+Besides HaLowScope (in the factory slot) the flash has three spare 4 MB
+slots for other ESP-IDF firmware for this board, and the Firmware panel
+manages them:
+
+1. Put the firmware in the TF card's `firmware/` folder, or upload it from
+   the panel. It must be an app image as built (`build/<project>.bin`),
+   not a merged full-flash image. Over HaLow a 1.8 MB upload took about
+   15 s, during which the live view pauses.
+2. *Write into slot* checks the image and writes it, in a few seconds.
+3. Start it:
+   - *Start until restart*: it runs until the next reset, crash or power
+     cycle, then the board comes back to HaLowScope. A safe way to try
+     something.
+   - *Start and keep*: it starts at every boot. The way back is that
+     firmware's own option if it has one, or over USB:
+     `esptool --port /dev/ttyUSB0 erase-region 0x410000 0x2000` clears the
+     choice and the board starts HaLowScope again.
+
+A HaLowScope build started from a slot confirms itself once it is up, so it
+stays even when started "until restart".
+
+Before starting a slot the board holds the HaLow module in reset and does a
+full chip reset, so the next firmware finds the hardware as at power on.
+The stock camera firmware runs this way too: it joins the HaLow network
+with the stored settings and serves its camera page. Cut its app out of
+your flash backup with:
+
+```
+python3 tools/app_from_flash.py backup/stock.bin stock-camera.bin
+```
+
+As with the rest of the page, anyone who can reach the board can do this.
 
 ## Span, filter and width
 
@@ -260,7 +349,8 @@ choosing 80 Msps sets it back to 0. On the test board that lowered the
 - History travels over HaLow: a screen of it takes a few seconds, and while
   a large amount comes off the card the live view can pause for a few
   seconds.
-- The camera is not used.
+- HaLowScope does not use the camera (the stock firmware does, and can
+  run from a slot).
 
 ## Credits
 
