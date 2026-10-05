@@ -58,6 +58,30 @@
       <ol id="det-events" class="events"></ol>
     </details>
 
+    <details id="panel-outputs" data-panel="outputs">
+      <summary>Outputs</summary>
+      <h3>Node</h3>
+      <div class="row"><label for="out-callsign">Callsign</label><input id="out-callsign" type="text" maxlength="23"></div>
+      <div class="row check"><label><input id="out-pos" type="checkbox"> Position known</label></div>
+      <div class="row"><label for="out-lat">Latitude</label><input id="out-lat" type="text" inputmode="decimal"><span class="unit">&deg;</span></div>
+      <div class="row"><label for="out-lon">Longitude</label><input id="out-lon" type="text" inputmode="decimal"><span class="unit">&deg;</span></div>
+      <div class="row"><label for="out-alt">Height</label><input id="out-alt" type="text" inputmode="decimal"><span class="unit">m</span></div>
+      <h3>MQTT</h3>
+      <div class="row check"><label><input id="out-mqtt-on" type="checkbox"> Publish events to a broker</label></div>
+      <div class="row"><label for="out-mqtt-host">Broker</label><input id="out-mqtt-host" type="text" maxlength="63" spellcheck="false"></div>
+      <div class="row"><label for="out-mqtt-port">Port</label><input id="out-mqtt-port" type="text" inputmode="numeric"></div>
+      <div class="row"><label for="out-mqtt-topic">Topic</label><input id="out-mqtt-topic" type="text" maxlength="63" spellcheck="false"></div>
+      <div class="row"><label for="out-mqtt-user">User</label><input id="out-mqtt-user" type="text" maxlength="31" spellcheck="false" autocomplete="off"></div>
+      <div class="row"><label for="out-mqtt-pass">Password</label><input id="out-mqtt-pass" type="password" maxlength="31" autocomplete="new-password"></div>
+      <h3>Cursor on Target</h3>
+      <div class="row check"><label><input id="out-cot-on" type="checkbox"> Send to TAK</label></div>
+      <div class="row"><label for="out-cot-group">Address</label><input id="out-cot-group" type="text" maxlength="15" spellcheck="false"></div>
+      <div class="row"><label for="out-cot-port">Port</label><input id="out-cot-port" type="text" inputmode="numeric"></div>
+      <div class="row buttons"><button id="out-save" type="button">Save on the board</button></div>
+      <p class="note" id="out-status"></p>
+      <p class="note">MQTT: one small JSON message per event start, update (every 10 s while it lasts) and end, to <i>topic</i>/event; plain MQTT, no TLS. CoT: to a multicast group (TAK's usual is 239.2.3.1, port 6969) or one receiver's address; the node once a minute, and each event as a marker at the node's position, cleared when it ends; needs the position. Some routers and Wi-Fi networks do not pass multicast on: if TAK sees nothing, try a receiver's address. The password stays on the board and is never shown again.</p>
+    </details>
+
     <details id="panel-receiver" data-panel="receiver">
       <summary>Receiver</summary>
       <div class="row"><label for="lo">LO</label><input id="lo" type="text" inputmode="decimal" spellcheck="false"><span class="unit">MHz</span></div>

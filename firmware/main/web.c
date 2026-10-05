@@ -19,6 +19,8 @@
  *     clock  {ms}                      the browser's clock, used without NTP
  *     detector {config?}               sets the detector (if given); answered
  *                                      by detector {config, events}
+ *     outputs {config?}                sets the outputs (if given); answered by
+ *                                      outputs {config} (never the password)
  *     history  {id, top, row_ms, rows, start, stop, bins}  past rows
  *     overview {id, rows, groups, start, stop}  the whole history, averaged
  *   board -> browser
@@ -66,6 +68,7 @@
 #include "wallclock.h"
 #include "archive.h"
 #include "detector.h"
+#include "outputs.h"
 
 static const char *TAG = "web";
 
@@ -407,6 +410,14 @@ static void send_status(int fd)
     cJSON_AddBoolToObject(de, "on", detc.on);
     cJSON_AddNumberToObject(de, "active", detector_active());
 
+    struct outputs_status os;
+    outputs_status(&os);
+    cJSON *ou = cJSON_AddObjectToObject(j, "outputs");
+    cJSON_AddStringToObject(ou, "mqtt", os.mqtt);
+    cJSON_AddStringToObject(ou, "cot", os.cot);
+    cJSON_AddNumberToObject(ou, "mqtt_sent", os.mqtt_sent);
+    cJSON_AddNumberToObject(ou, "cot_sent", os.cot_sent);
+
     cJSON *d = cJSON_AddObjectToObject(j, "device");
     cJSON_AddStringToObject(d, "ip", ip);
     cJSON_AddNumberToObject(d, "rssi", hs_link_rssi());
@@ -713,6 +724,71 @@ static void on_detector(int fd, const cJSON *j)
     send_detector(fd);
 }
 
+static void send_outputs(int fd)
+{
+    struct outputs_config c;
+    outputs_get_config(&c);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "t", "outputs");
+    cJSON *k = cJSON_AddObjectToObject(j, "config");
+    cJSON_AddBoolToObject(k, "has_position", c.has_position);
+    cJSON_AddNumberToObject(k, "lat", c.lat);
+    cJSON_AddNumberToObject(k, "lon", c.lon);
+    cJSON_AddNumberToObject(k, "alt", c.alt_m);
+    cJSON_AddStringToObject(k, "callsign", c.callsign);
+    cJSON_AddBoolToObject(k, "mqtt_on", c.mqtt_on);
+    cJSON_AddStringToObject(k, "mqtt_host", c.mqtt_host);
+    cJSON_AddNumberToObject(k, "mqtt_port", c.mqtt_port);
+    cJSON_AddStringToObject(k, "mqtt_topic", c.mqtt_topic);
+    cJSON_AddStringToObject(k, "mqtt_user", c.mqtt_user);
+    cJSON_AddBoolToObject(k, "mqtt_has_pass", c.mqtt_pass[0] != 0);
+    cJSON_AddBoolToObject(k, "cot_on", c.cot_on);
+    cJSON_AddStringToObject(k, "cot_group", c.cot_group);
+    cJSON_AddNumberToObject(k, "cot_port", c.cot_port);
+    send_json(fd, j);
+}
+
+static void copy_string(const cJSON *k, const char *key, char *out, size_t len)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(k, key);
+    if (cJSON_IsString(v))
+        strlcpy(out, v->valuestring, len);
+}
+
+static void copy_bool(const cJSON *k, const char *key, bool *out)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(k, key);
+    if (cJSON_IsBool(v))
+        *out = cJSON_IsTrue(v);
+}
+
+static void on_outputs(int fd, const cJSON *j)
+{
+    const cJSON *k = cJSON_GetObjectItemCaseSensitive(j, "config");
+    if (cJSON_IsObject(k)) {
+        struct outputs_config c;
+        outputs_get_config(&c);
+        copy_bool(k, "has_position", &c.has_position);
+        c.lat = number(k, "lat", c.lat);
+        c.lon = number(k, "lon", c.lon);
+        c.alt_m = number(k, "alt", c.alt_m);
+        copy_string(k, "callsign", c.callsign, sizeof(c.callsign));
+        copy_bool(k, "mqtt_on", &c.mqtt_on);
+        copy_string(k, "mqtt_host", c.mqtt_host, sizeof(c.mqtt_host));
+        c.mqtt_port = (uint16_t)number(k, "mqtt_port", c.mqtt_port);
+        copy_string(k, "mqtt_topic", c.mqtt_topic, sizeof(c.mqtt_topic));
+        copy_string(k, "mqtt_user", c.mqtt_user, sizeof(c.mqtt_user));
+        c.mqtt_pass[0] = 0;   /* empty keeps the saved one */
+        copy_string(k, "mqtt_pass", c.mqtt_pass, sizeof(c.mqtt_pass));
+        copy_bool(k, "cot_on", &c.cot_on);
+        copy_string(k, "cot_group", c.cot_group, sizeof(c.cot_group));
+        c.cot_port = (uint16_t)number(k, "cot_port", c.cot_port);
+        if (!outputs_set_config(&c))
+            web_notice("Output settings incomplete or out of range: not saved.");
+    }
+    send_outputs(fd);
+}
+
 /* Event changes, from the detector's reporter task. */
 static void event_to_page(enum detector_report kind, const struct detector_event *e)
 {
@@ -773,6 +849,8 @@ static void on_message(int fd, const char *text)
         on_sweep(j);
     } else if (strcmp(type, "detector") == 0) {
         on_detector(fd, j);
+    } else if (strcmp(type, "outputs") == 0) {
+        on_outputs(fd, j);
     } else if (strcmp(type, "clock") == 0) {
         wallclock_offer(number(j, "ms", 0));
     } else if (strcmp(type, "history") == 0 || strcmp(type, "overview") == 0) {

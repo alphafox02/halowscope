@@ -1,7 +1,7 @@
 # Copyright 2026 CEMAXECUTER LLC
 
 idf_component_register(
-    SRCS "main.c" "halow_link.c" "console.c" "web.c" "radio.c" "spectrum.c" "storage.c" "history.c" "wallclock.c" "archive.c" "detector.c"
+    SRCS "main.c" "halow_link.c" "console.c" "web.c" "radio.c" "spectrum.c" "storage.c" "history.c" "wallclock.c" "archive.c" "detector.c" "settings.c" "outputs.c"
     INCLUDE_DIRS "."
     REQUIRES nvs_flash esp_netif esp_event esp_driver_uart esp_http_server esp_phy esp_hw_support
              esp_timer heap json fatfs sdmmc esp_driver_sdmmc

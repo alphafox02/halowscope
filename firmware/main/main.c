@@ -14,6 +14,8 @@
 #include "history.h"
 #include "archive.h"
 #include "detector.h"
+#include "settings.h"
+#include "outputs.h"
 
 static const char *TAG = "halowscope";
 
@@ -30,8 +32,10 @@ void app_main(void)
     hs_console_start();
     hs_link_start();
     hs_web_start();
+    settings_start();
     history_start();
     detector_start();
+    outputs_start();
     spectrum_start();
     storage_start();
     archive_start();

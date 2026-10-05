@@ -24,7 +24,7 @@ const DEFAULTS = {
     split: 0.42, maxFps: 0, maxKbps: 0, maxBins: -1,  // -1: automatic resolution
     railPinned: false,                       // keep the time rail on the waterfall's edge
     sidebar: window.innerWidth > 900,
-    open: {sweep: true, detector: false, receiver: true, fft: false, display: false, device: true, link: false},
+    open: {sweep: true, detector: false, outputs: false, receiver: true, fft: false, display: false, device: true, link: false},
 };
 const prefs = (() => {
     try {
@@ -95,6 +95,7 @@ function connect() {
         ping();
         send({t: 'clock', ms: Date.now()});   // used by the board only without NTP
         requestDetector();
+        send({t: 'outputs'});
         showLink();
     };
     ws.onmessage = (event) => {
@@ -171,6 +172,7 @@ function onMessage(m) {
     else if (m.t === 'notice') toast(m.text, 'bad');
     else if (m.t === 'detector') onDetector(m);
     else if (m.t === 'event') onEvent(m);
+    else if (m.t === 'outputs') onOutputs(m);
     else if (m.t === 'pong') {
         const now = performance.now();
         link.rtt = now - m.c;
@@ -608,6 +610,46 @@ function drawEventMarks(ctx, y0, h, now, top, rowMs, total) {
         if (yo >= y0 && yo <= y0 + h) ctx.fillRect(RAIL - 4, Math.round(yo) - 1, 4, 3);
     }
 }
+
+// ---- outputs: MQTT and Cursor on Target --------------------------------------------------------------
+
+const outputs = {config: null, editing: -Infinity};   // editing: when the user last typed
+const OUT_FIELDS = [['callsign', 'out-callsign', 'text'], ['has_position', 'out-pos', 'check'],
+                    ['lat', 'out-lat', 'number'], ['lon', 'out-lon', 'number'], ['alt', 'out-alt', 'number'],
+                    ['mqtt_on', 'out-mqtt-on', 'check'], ['mqtt_host', 'out-mqtt-host', 'text'],
+                    ['mqtt_port', 'out-mqtt-port', 'number'], ['mqtt_topic', 'out-mqtt-topic', 'text'],
+                    ['mqtt_user', 'out-mqtt-user', 'text'], ['cot_on', 'out-cot-on', 'check'],
+                    ['cot_group', 'out-cot-group', 'text'], ['cot_port', 'out-cot-port', 'number']];
+
+function onOutputs(m) {
+    if (performance.now() - outputs.editing < 3000) return;   // not while the user is typing
+    outputs.config = m.config;
+    for (const [key, id, kind] of OUT_FIELDS) {
+        if (kind === 'check') $(id).checked = m.config[key];
+        else $(id).value = String(m.config[key]);
+    }
+    $('out-mqtt-pass').value = '';
+    $('out-mqtt-pass').placeholder = m.config.mqtt_has_pass ? 'saved (leave empty to keep)' : 'none';
+}
+
+function showOutputsStatus(o) {
+    if (!o) return;
+    $('out-status').textContent = `MQTT: ${o.mqtt}${o.mqtt_sent ? ` (${o.mqtt_sent} sent)` : ''} · ` +
+        `CoT: ${o.cot}${o.cot_sent ? ` (${o.cot_sent} sent)` : ''}`;
+}
+
+$('panel-outputs').addEventListener('input', () => { outputs.editing = performance.now(); });
+$('out-save').addEventListener('click', () => {
+    const config = {};
+    for (const [key, id, kind] of OUT_FIELDS) {
+        config[key] = kind === 'check' ? $(id).checked : kind === 'number' ? Number($(id).value) : $(id).value.trim();
+    }
+    const pass = $('out-mqtt-pass').value;
+    if (pass) config.mqtt_pass = pass;
+    outputs.editing = -Infinity;
+    if (send({t: 'outputs', config})) toast('Output settings saved on the board.');
+    else toast('Not connected.', 'bad');
+});
 
 // ---- view ----------------------------------------------------------------------------------------------
 
@@ -1155,6 +1197,7 @@ function onStatus(m) {
     showFft(s);
     showSweep(s.sweep);
     showDevice(s);
+    showOutputsStatus(s.outputs);
     showLinkStats(s.link);
     enableControls();
 }

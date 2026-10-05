@@ -38,6 +38,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs.h"
+#include "settings.h"
 #include "storage.h"
 #include "wallclock.h"
 
@@ -141,12 +142,7 @@ bool detector_set_config(const struct detector_config *c)
     config = *c;
     xSemaphoreGive(config_lock);
     struct { uint32_t version; struct detector_config c; } saved = { CONFIG_VERSION, *c };
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_blob(h, NVS_KEY, &saved, sizeof(saved));
-        nvs_commit(h);
-        nvs_close(h);
-    }
+    settings_save(NVS_KEY, &saved, sizeof(saved));
     return true;
 }
 
