@@ -203,33 +203,39 @@ void web_publish(const float *db, unsigned bins, double start_hz, double stop_hz
     a = fmax(a, start_hz);
     b = fmin(b, stop_hz);
     unsigned out = view.bins ? view.bins : (bins < MAX_BINS ? bins : MAX_BINS);
-    double in_bin = (stop_hz - start_hz) / bins, out_bin = (b - a) / out;
+    /* Positions in input bins, worked out in single precision from offsets
+     * taken once in double: the S3 has no double-precision FPU. */
+    float in_per_out = (float)((b - a) / out / ((stop_hz - start_hz) / bins));
+    float first = (float)((a - start_hz) / ((stop_hz - start_hz) / bins));
 
     bool same = pending.ready && pending.bins == out && pending.start == a && pending.stop == b &&
                 pending.peak == peak;
     for (unsigned j = 0; j < out; j++) {
-        double x0 = (a + j * out_bin - start_hz) / in_bin, x1 = x0 + out_bin / in_bin;
+        float x0 = first + j * in_per_out, x1 = x0 + in_per_out;
         float v;
-        if (x1 - x0 >= 1.0) {
-            int i0 = (int)floor(x0), i1 = (int)ceil(x1);
+        if (in_per_out >= 1.0f) {
+            int i0 = (int)x0, i1 = (int)x1;
+            if (x1 > (float)i1)
+                i1++;
             if (i0 < 0)
                 i0 = 0;
             if (i1 > (int)bins)
                 i1 = bins;
-            v = -INFINITY;
-            for (int i = i0; i < i1; i++)
-                v = fmaxf(v, db[i]);
+            v = db[i0 < (int)bins ? i0 : bins - 1];
+            for (int i = i0 + 1; i < i1; i++)
+                if (db[i] > v)
+                    v = db[i];
         } else {
-            double x = (x0 + x1) / 2 - 0.5;
+            float x = (x0 + x1) * 0.5f - 0.5f;
             if (x < 0)
                 x = 0;
             if (x > bins - 1)
                 x = bins - 1;
             unsigned i = (unsigned)x;
-            float f = (float)(x - i);
+            float f = x - i;
             v = i + 1 < bins ? db[i] * (1 - f) + db[i + 1] * f : db[i];
         }
-        pending.db[j] = same ? fmaxf(pending.db[j], v) : v;
+        pending.db[j] = same && pending.db[j] > v ? pending.db[j] : v;
     }
     pending.merged = same ? pending.merged + 1 : 1;
     pending.ready = true;
