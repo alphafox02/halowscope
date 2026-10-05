@@ -17,6 +17,8 @@
  *     ping   {c}                       answered by pong {c, s}
  *     ack    {seq}                     frame received
  *     clock  {ms}                      the browser's clock, used without NTP
+ *     detector {config?}               sets the detector (if given); answered
+ *                                      by detector {config, events}
  *     history  {id, top, row_ms, rows, start, stop, bins}  past rows
  *     overview {id, rows, groups, start, stop}  the whole history, averaged
  *   board -> browser
@@ -63,6 +65,7 @@
 #include "history.h"
 #include "wallclock.h"
 #include "archive.h"
+#include "detector.h"
 
 static const char *TAG = "web";
 
@@ -398,6 +401,12 @@ static void send_status(int fd)
     cJSON_AddStringToObject(ck, "source", sources[wallclock_source()]);
     cJSON_AddNumberToObject(ck, "boot_epoch", wallclock_boot_epoch_ms());
 
+    struct detector_config detc;
+    detector_get_config(&detc);
+    cJSON *de = cJSON_AddObjectToObject(j, "detector");
+    cJSON_AddBoolToObject(de, "on", detc.on);
+    cJSON_AddNumberToObject(de, "active", detector_active());
+
     cJSON *d = cJSON_AddObjectToObject(j, "device");
     cJSON_AddStringToObject(d, "ip", ip);
     cJSON_AddNumberToObject(d, "rssi", hs_link_rssi());
@@ -617,6 +626,107 @@ static void history_task(void *arg)
     }
 }
 
+/* ---- detector ---------------------------------------------------------------------- */
+
+static cJSON *event_json(const struct detector_event *e)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "id", e->id);
+    cJSON_AddStringToObject(o, "rule", detector_rule_name(e->rule));
+    cJSON_AddBoolToObject(o, "active", e->active);
+    cJSON_AddNumberToObject(o, "start", e->start_ms);
+    cJSON_AddNumberToObject(o, "last", e->last_ms);
+    cJSON_AddNumberToObject(o, "lo", e->lo_mhz);
+    cJSON_AddNumberToObject(o, "hi", e->hi_mhz);
+    cJSON_AddNumberToObject(o, "peak", e->peak_dbfs);
+    cJSON_AddNumberToObject(o, "excess", e->excess_db);
+    return o;
+}
+
+static void send_detector(int fd)
+{
+    struct detector_config c;
+    detector_get_config(&c);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "t", "detector");
+    cJSON *k = cJSON_AddObjectToObject(j, "config");
+    cJSON_AddBoolToObject(k, "on", c.on);
+    cJSON_AddNumberToObject(k, "duty", c.duty);
+    cJSON_AddNumberToObject(k, "learn_min", c.learn_min);
+    cJSON_AddNumberToObject(k, "end_s", c.end_s);
+    cJSON_AddNumberToObject(k, "cooldown_s", c.cooldown_s);
+    cJSON *rules = cJSON_AddArrayToObject(k, "rules");
+    for (unsigned r = 0; r < DETECTOR_RULES; r++) {
+        const struct detector_rule *u = &c.rule[r];
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "on", u->on);
+        cJSON_AddStringToObject(o, "name", u->name);
+        cJSON_AddNumberToObject(o, "start", u->start_mhz);
+        cJSON_AddNumberToObject(o, "stop", u->stop_mhz);
+        cJSON_AddNumberToObject(o, "threshold", u->threshold_db);
+        cJSON_AddNumberToObject(o, "min_bw", u->min_bw_mhz);
+        cJSON_AddNumberToObject(o, "min_s", u->min_s);
+        cJSON_AddItemToArray(rules, o);
+    }
+    static struct detector_event list[100];
+    unsigned n = detector_events(list, 100);
+    cJSON *ev = cJSON_AddArrayToObject(j, "events");
+    for (unsigned i = 0; i < n; i++)
+        cJSON_AddItemToArray(ev, event_json(&list[i]));
+    send_json(fd, j);
+}
+
+static void on_detector(int fd, const cJSON *j)
+{
+    const cJSON *k = cJSON_GetObjectItemCaseSensitive(j, "config");
+    if (cJSON_IsObject(k)) {
+        struct detector_config c;
+        detector_get_config(&c);
+        const cJSON *on = cJSON_GetObjectItemCaseSensitive(k, "on");
+        if (cJSON_IsBool(on))
+            c.on = cJSON_IsTrue(on);
+        c.duty = number(k, "duty", c.duty);
+        c.learn_min = number(k, "learn_min", c.learn_min);
+        c.end_s = number(k, "end_s", c.end_s);
+        c.cooldown_s = number(k, "cooldown_s", c.cooldown_s);
+        const cJSON *rules = cJSON_GetObjectItemCaseSensitive(k, "rules");
+        for (unsigned r = 0; r < DETECTOR_RULES && cJSON_IsArray(rules); r++) {
+            const cJSON *o = cJSON_GetArrayItem(rules, r);
+            if (!cJSON_IsObject(o))
+                break;
+            struct detector_rule *u = &c.rule[r];
+            const cJSON *ron = cJSON_GetObjectItemCaseSensitive(o, "on");
+            if (cJSON_IsBool(ron))
+                u->on = cJSON_IsTrue(ron);
+            const cJSON *name = cJSON_GetObjectItemCaseSensitive(o, "name");
+            if (cJSON_IsString(name))
+                strlcpy(u->name, name->valuestring, sizeof(u->name));
+            u->start_mhz = number(o, "start", u->start_mhz);
+            u->stop_mhz = number(o, "stop", u->stop_mhz);
+            u->threshold_db = number(o, "threshold", u->threshold_db);
+            u->min_bw_mhz = number(o, "min_bw", u->min_bw_mhz);
+            u->min_s = number(o, "min_s", u->min_s);
+        }
+        if (!detector_set_config(&c))
+            web_notice("Detector settings out of range: not saved.");
+    }
+    send_detector(fd);
+}
+
+/* Event changes, from the detector's reporter task. */
+static void event_to_page(enum detector_report kind, const struct detector_event *e)
+{
+    static const char *const kinds[] = { "start", "update", "end" };
+    int fd = client_fd;
+    if (fd < 0)
+        return;
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "t", "event");
+    cJSON_AddStringToObject(j, "kind", kinds[kind]);
+    cJSON_AddItemToObject(j, "event", event_json(e));
+    send_json(fd, j);
+}
+
 static void on_message(int fd, const char *text)
 {
     cJSON *j = cJSON_Parse(text);
@@ -661,6 +771,8 @@ static void on_message(int fd, const char *text)
         on_fft(j);
     } else if (strcmp(type, "sweep") == 0) {
         on_sweep(j);
+    } else if (strcmp(type, "detector") == 0) {
+        on_detector(fd, j);
     } else if (strcmp(type, "clock") == 0) {
         wallclock_offer(number(j, "ms", 0));
     } else if (strcmp(type, "history") == 0 || strcmp(type, "overview") == 0) {
@@ -804,4 +916,5 @@ void hs_web_start(void)
     history_sent = xSemaphoreCreateBinary();
     xTaskCreateWithCaps(history_task, "history", 5120, NULL, 2, &history_task_handle,
                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    detector_add_sink(event_to_page);
 }

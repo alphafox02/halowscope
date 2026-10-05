@@ -14,6 +14,7 @@
 #include "history.h"
 #include "history_line.h"
 #include "archive.h"
+#include "detector.h"
 
 #include <math.h>
 #include <string.h>
@@ -81,6 +82,7 @@ static void flush(void)
     xSemaphoreGive(lock);
     acc_have = false;
     archive_line(l);
+    detector_line(l);
 }
 
 void history_record(const float *db, unsigned bins, double start_hz, double stop_hz, bool peak)
