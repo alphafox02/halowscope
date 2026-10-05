@@ -8,6 +8,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "nvs.h"
@@ -148,6 +150,10 @@ static void join(void)
     } else {
         conf.sta.security_type = MMWLAN_OPEN;
     }
+    /* Retries after a lost or missing AP back off from 2 s; the driver's
+     * default limit of 512 s could leave the board waiting over 8 minutes
+     * after an AP restart. On USB power, scanning every 30 s costs nothing. */
+    conf.sta.scan_interval_limit_s = 30;
     mmhalow_set_config(WIFI_IF_STA, &conf);
     ESP_LOGI(TAG, "Joining \"%s\" (%s)", c.ssid, c.pass[0] ? "SAE" : "open");
     esp_err_t err = mmhalow_connect(sta_state);
@@ -155,9 +161,14 @@ static void join(void)
         ESP_LOGE(TAG, "mmhalow_connect: %s", esp_err_to_name(err));
 }
 
-/* One status line every 10 s, to follow association and DHCP on serial. */
+/* Without an address this long, despite the retries, start over. */
+#define OFFLINE_RESTART_US (10LL * 60 * 1000000)
+
+/* One status line every 10 s, to follow association and DHCP on serial; and
+ * a last resort if the link never comes back. */
 static void status_task(void *arg)
 {
+    int64_t last_online = esp_timer_get_time();
     static const char *const names[] = { "disabled", "connecting", "connected" };
     esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_dhcp_status_t dhcp = ESP_NETIF_DHCP_INIT;
@@ -173,6 +184,14 @@ static void status_task(void *arg)
                  sta < 3 ? names[sta] : "?", (long)mmwlan_get_rssi(),
                  nif && esp_netif_is_netif_up(nif) ? "up" : "down", (int)dhcp,
                  IP2STR(&info.ip));
+        struct hs_creds c;
+        if (sta == MMWLAN_STA_CONNECTED && info.ip.addr)
+            last_online = esp_timer_get_time();
+        else if (esp_timer_get_time() - last_online > OFFLINE_RESTART_US && hs_creds_load(&c) == ESP_OK) {
+            ESP_LOGW(TAG, "no HaLow link for 10 minutes: restarting");
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_restart();
+        }
     }
 }
 
