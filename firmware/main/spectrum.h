@@ -37,6 +37,13 @@ struct spectrum_status {
     uint32_t retune_us;   /* last LO change */
     uint32_t sweep_ms;    /* last complete sweep */
     unsigned failures;    /* snapshots where the writer did not run */
+    /* Where the time goes, from the last fixed-mode frame: microseconds per
+     * FFT block for each stage, and per frame for the rest. */
+    struct {
+        float unpack, window, fft, bitrev, power;   /* per FFT block */
+        float capture, to_db, publish, frame;       /* per frame */
+        unsigned ffts, snapshots;
+    } profile;
 };
 
 /* Calibrates the radio and starts the spectrum task. */

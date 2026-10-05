@@ -309,6 +309,19 @@ static void send_status(int fd)
     cJSON_AddNumberToObject(sp, "sweep_ms", s.sweep_ms);
     cJSON_AddNumberToObject(sp, "failures", s.failures);
 
+    cJSON *pr = cJSON_AddObjectToObject(j, "profile");
+    cJSON_AddNumberToObject(pr, "unpack_us", s.profile.unpack);
+    cJSON_AddNumberToObject(pr, "window_us", s.profile.window);
+    cJSON_AddNumberToObject(pr, "fft_us", s.profile.fft);
+    cJSON_AddNumberToObject(pr, "bitrev_us", s.profile.bitrev);
+    cJSON_AddNumberToObject(pr, "power_us", s.profile.power);
+    cJSON_AddNumberToObject(pr, "capture_us", s.profile.capture);
+    cJSON_AddNumberToObject(pr, "to_db_us", s.profile.to_db);
+    cJSON_AddNumberToObject(pr, "publish_us", s.profile.publish);
+    cJSON_AddNumberToObject(pr, "busy_us", s.profile.frame);
+    cJSON_AddNumberToObject(pr, "ffts", s.profile.ffts);
+    cJSON_AddNumberToObject(pr, "snapshots", s.profile.snapshots);
+
     cJSON *sw = cJSON_AddObjectToObject(j, "sweep");
     cJSON_AddBoolToObject(sw, "on", s.sweep.on);
     cJSON_AddNumberToObject(sw, "start", s.sweep.start_hz);

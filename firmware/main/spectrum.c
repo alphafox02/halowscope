@@ -25,6 +25,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_cpu.h"
 #include "dsps_fft2r.h"
 #include "dsps_wind.h"
 #include "radio.h"
@@ -64,6 +65,10 @@ static struct spectrum_status status = {
     .fft = { .size = 2048, .window = WINDOW_BLACKMAN_HARRIS, .rate = 20, .averaging = 0, .peak = false, .dc = true },
     .sweep = { .on = false, .start_hz = 2400000000u, .stop_hz = 2500000000u },
 };
+
+/* Stage timing, CPU cycles summed over the current frame. */
+static struct { uint32_t unpack, window, fft, bitrev, power, capture; } cycles;
+#define CYCLES_PER_US 240.0f
 
 /* Work buffers: the FFT's own in internal RAM, the rest where it fits. */
 static float *fft_buf;    /* 2 * MAX_FFT, complex interleaved */
@@ -280,6 +285,7 @@ static unsigned analyse(const uint32_t *ring, unsigned first, unsigned n, unsign
     for (unsigned b = 0; b < blocks; b++) {
         unsigned at = first + b * n;
         float mean_i = 0, mean_q = 0;
+        uint32_t c0 = esp_cpu_get_cycle_count();
         for (unsigned k = 0; k < n; k++) {
             uint32_t w = ring[(at + k) & RING_MASK];
             float i = (float)((int)((w & 1023u) ^ 512u) - 512);
@@ -293,12 +299,16 @@ static unsigned analyse(const uint32_t *ring, unsigned first, unsigned n, unsign
             mean_i = mean_q = 0;
         mean_i /= (float)n;
         mean_q /= (float)n;
+        uint32_t c1 = esp_cpu_get_cycle_count();
         for (unsigned k = 0; k < n; k++) {
             fft_buf[2 * k] = (fft_buf[2 * k] - mean_i) * window[k];
             fft_buf[2 * k + 1] = (fft_buf[2 * k + 1] - mean_q) * window[k];
         }
+        uint32_t c2 = esp_cpu_get_cycle_count();
         dsps_fft2r_fc32(fft_buf, n);
+        uint32_t c3 = esp_cpu_get_cycle_count();
         dsps_bit_rev_fc32(fft_buf, n);
+        uint32_t c4 = esp_cpu_get_cycle_count();
         if (peak) {
             for (unsigned k = 0; k < n; k++) {
                 float p = fft_buf[2 * k] * fft_buf[2 * k] + fft_buf[2 * k + 1] * fft_buf[2 * k + 1];
@@ -309,6 +319,12 @@ static unsigned analyse(const uint32_t *ring, unsigned first, unsigned n, unsign
             for (unsigned k = 0; k < n; k++)
                 power[k] += fft_buf[2 * k] * fft_buf[2 * k] + fft_buf[2 * k + 1] * fft_buf[2 * k + 1];
         }
+        uint32_t c5 = esp_cpu_get_cycle_count();
+        cycles.unpack += c1 - c0;
+        cycles.window += c2 - c1;
+        cycles.fft += c3 - c2;
+        cycles.bitrev += c4 - c3;
+        cycles.power += c5 - c4;
     }
     return blocks;
 }
@@ -365,10 +381,13 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
     uint32_t snapshot_us = 0;
 
     memset(power, 0, n * sizeof(float));
+    memset(&cycles, 0, sizeof(cycles));
     do {
         unsigned first;
         int64_t t = esp_timer_get_time();
+        uint32_t c0 = esp_cpu_get_cycle_count();
         const uint32_t *ring = radio_snapshot(&first);
+        cycles.capture += esp_cpu_get_cycle_count() - c0;
         if (!ring) {
             failures++;
             vTaskDelay(1);
@@ -384,12 +403,16 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
         vTaskDelay(1);
     } while ((c->averaging == 0 || ffts < c->averaging) && esp_timer_get_time() < deadline && failures < 8);
 
+    int64_t work_end = esp_timer_get_time(), t_db = 0, t_pub = 0;
     if (ffts) {
         to_db(line, n, 0, n, ffts, c->peak, c->dc, rate);
+        t_db = esp_timer_get_time();
         double lo = radio_settings()->lo_hz;
         web_publish(line, n, lo - rate / 2, lo + rate / 2, c->peak);
+        t_pub = esp_timer_get_time();
         count_frame(last_frame);
     }
+    int64_t busy = esp_timer_get_time() - start;
 
     /* Pace the frame first, so the coverage covers the whole frame interval,
      * including the wait when a fixed averaging count finished early. */
@@ -405,6 +428,20 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
     status.coverage = elapsed > 0 ? (float)(ffts * n) / (float)(rate * elapsed / 1e6) : 0;
     status.snapshot_us = snapshot_us;
     status.failures += failures;
+    if (ffts) {
+        float per = CYCLES_PER_US * ffts;
+        status.profile.unpack = cycles.unpack / per;
+        status.profile.window = cycles.window / per;
+        status.profile.fft = cycles.fft / per;
+        status.profile.bitrev = cycles.bitrev / per;
+        status.profile.power = cycles.power / per;
+        status.profile.capture = cycles.capture / CYCLES_PER_US;
+        status.profile.to_db = (float)(t_db - work_end);
+        status.profile.publish = (float)(t_pub - t_db);
+        status.profile.frame = (float)busy;
+        status.profile.ffts = ffts;
+        status.profile.snapshots = snapshots;
+    }
     xSemaphoreGive(status_lock);
 }
 
