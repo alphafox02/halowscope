@@ -73,7 +73,9 @@ static struct { uint32_t unpack, window, fft, bitrev, power, capture; } cycles;
 /* Work buffers: the FFT's own in internal RAM, the rest where it fits. */
 static float *fft_buf;    /* 2 * MAX_FFT, complex interleaved */
 static float *window;     /* window_size */
-static float *power;      /* window_size, accumulated linear power in FFT bin order */
+static float *power;      /* window_size, accumulated linear power, in the FFT's
+                           * bit-reversed output order */
+static uint16_t *reversed;/* window_size: natural bin -> index in power[] */
 static float window_sum;
 static unsigned window_size, window_kind = WINDOW_COUNT;
 /* Frame being built, dB per output bin; PSRAM for long sweeps. */
@@ -261,6 +263,17 @@ static void prepare_window(unsigned n, unsigned kind)
     if (n != window_size) {
         window = buffer_for(window, n);
         power = buffer_for(power, n);
+        /* The same size as a float array, so buffer_for's placement applies. */
+        reversed = (uint16_t *)buffer_for((float *)reversed, (n + 1) / 2);
+        unsigned bits = 0;
+        while ((1u << bits) < n)
+            bits++;
+        for (unsigned k = 0; k < n; k++) {
+            unsigned r = 0;
+            for (unsigned b = 0; b < bits; b++)
+                r |= ((k >> b) & 1u) << (bits - 1 - b);
+            reversed[k] = (uint16_t)r;
+        }
     }
     if (kind == WINDOW_HANN)
         dsps_wind_hann_f32(window, n);
@@ -307,7 +320,8 @@ static unsigned analyse(const uint32_t *ring, unsigned first, unsigned n, unsign
         uint32_t c2 = esp_cpu_get_cycle_count();
         dsps_fft2r_fc32(fft_buf, n);
         uint32_t c3 = esp_cpu_get_cycle_count();
-        dsps_bit_rev_fc32(fft_buf, n);
+        /* No bit reversal: power[] stays in the FFT's output order and
+         * to_db() looks each bin up through reversed[]. */
         uint32_t c4 = esp_cpu_get_cycle_count();
         if (peak) {
             for (unsigned k = 0; k < n; k++) {
@@ -358,7 +372,7 @@ static void to_db(float *out, unsigned n, unsigned from, unsigned to, unsigned f
         scale /= (float)ffts;
     float offset = 10.0f * log10f(scale);
     for (unsigned j = from; j < to; j++) {
-        float p = power[(n / 2 - j) & (n - 1)];
+        float p = power[reversed[(n / 2 - j) & (n - 1)]];
         out[j - from] = p > 0 ? fast_db(p) + offset : -200.0f;
     }
     if (!notch)
