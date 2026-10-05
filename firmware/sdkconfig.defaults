@@ -16,6 +16,8 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# Optimise for speed (-O2); the spectrum loops run several times faster than at -Og.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # 1 ms ticks: the spectrum task yields between snapshots without losing 10 ms.
 CONFIG_FREERTOS_HZ=1000
 
