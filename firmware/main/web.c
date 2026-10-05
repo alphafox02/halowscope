@@ -651,6 +651,15 @@ static cJSON *event_json(const struct detector_event *e)
     cJSON_AddNumberToObject(o, "hi", e->hi_mhz);
     cJSON_AddNumberToObject(o, "peak", e->peak_dbfs);
     cJSON_AddNumberToObject(o, "excess", e->excess_db);
+    cJSON_AddStringToObject(o, "type", detector_type_name(e->type));
+    cJSON *f = cJSON_AddObjectToObject(o, "features");
+    cJSON_AddNumberToObject(f, "center", e->f.center_mhz);
+    cJSON_AddNumberToObject(f, "center_sd", e->f.center_sd_mhz);
+    cJSON_AddNumberToObject(f, "width", e->f.width_mhz);
+    cJSON_AddNumberToObject(f, "width_sd", e->f.width_sd_mhz);
+    cJSON_AddNumberToObject(f, "duty", e->f.duty);
+    cJSON_AddNumberToObject(f, "wifi_share", e->f.wifi_share);
+    cJSON_AddNumberToObject(f, "samples", e->f.samples);
     return o;
 }
 

@@ -32,13 +32,29 @@ struct detector_config {
     struct detector_rule rule[DETECTOR_RULES];
 };
 
+/* What an event looks like, from its shape and behaviour (no trained model:
+ * explicit rules, see classify() in detector.c). */
+enum detector_type { TYPE_UNCLASSIFIED, TYPE_WIFI, TYPE_WIDE, TYPE_WANDERING, TYPE_STEADY, TYPE_COUNT };
+
+/* Measured over an event's life; logged with it, as data for better rules
+ * or a trained model later. */
+struct detector_features {
+    float center_mhz, center_sd_mhz;   /* mean and spread of the centre */
+    float width_mhz, width_sd_mhz;     /* mean and spread of the occupied width */
+    float duty;                        /* share of lines it was present in */
+    float wifi_share;                  /* share of sightings shaped like a Wi-Fi channel */
+    uint32_t samples;                  /* sightings */
+};
+
 struct detector_event {
     uint32_t id;
     uint8_t rule;
+    uint8_t type;               /* enum detector_type */
     bool active;
     double start_ms, last_ms;   /* since boot */
     float lo_mhz, hi_mhz;       /* occupied range when strongest */
     float peak_dbfs, excess_db; /* strongest level, and its height over the floor */
+    struct detector_features f;
 };
 
 enum detector_report { REPORT_START, REPORT_UPDATE, REPORT_END };
@@ -57,6 +73,7 @@ bool detector_set_config(const struct detector_config *c);
 unsigned detector_events(struct detector_event *out, unsigned max);
 unsigned detector_active(void);
 const char *detector_rule_name(unsigned rule);
+const char *detector_type_name(unsigned type);
 
 /* Called by the reporter for each event change, outside the spectrum task:
  * the web page and the outputs hook in here. */

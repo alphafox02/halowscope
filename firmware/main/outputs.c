@@ -387,11 +387,12 @@ static void task(void *arg)
         strlcpy(rule, detector_rule_name(e->rule), sizeof(rule));
         xml_safe(rule);
         if (mqtt >= 0) {
-            char json[400], topic[80];
+            char json[480], topic[80];
             snprintf(json, sizeof(json),
-                     "{\"node\":\"%s\",\"id\":%lu,\"kind\":\"%s\",\"rule\":\"%s\",\"start\":\"%s\",\"last\":\"%s\","
-                     "\"duration_s\":%.1f,\"lo_mhz\":%.2f,\"hi_mhz\":%.2f,\"peak_dbfs\":%.1f,\"excess_db\":%.1f}",
-                     c.callsign, (unsigned long)e->id, kinds[msg.kind], rule, start, last,
+                     "{\"node\":\"%s\",\"id\":%lu,\"kind\":\"%s\",\"rule\":\"%s\",\"type\":\"%s\",\"start\":\"%s\","
+                     "\"last\":\"%s\",\"duration_s\":%.1f,\"lo_mhz\":%.2f,\"hi_mhz\":%.2f,\"peak_dbfs\":%.1f,"
+                     "\"excess_db\":%.1f}",
+                     c.callsign, (unsigned long)e->id, kinds[msg.kind], rule, detector_type_name(e->type), start, last,
                      (e->last_ms - e->start_ms) / 1000, e->lo_mhz, e->hi_mhz, e->peak_dbfs, e->excess_db);
             snprintf(topic, sizeof(topic), "%s/event", c.mqtt_topic);
             if (mqtt_publish(mqtt, topic, json)) {
@@ -405,12 +406,12 @@ static void task(void *arg)
             }
         }
         if (cot_ok) {
-            char uid[96], callsign[96], remarks[200];
+            char uid[96], callsign[96], remarks[260];
             snprintf(uid, sizeof(uid), "%s-event-%lu", node_uid, (unsigned long)e->id);
             snprintf(callsign, sizeof(callsign), "%s RF %.0f-%.0f MHz", c.callsign, e->lo_mhz, e->hi_mhz);
-            snprintf(remarks, sizeof(remarks), "%s: %.1f-%.1f MHz, %.0f dB above usual, peak %.0f dBFS, %.0f s (%s)",
-                     rule, e->lo_mhz, e->hi_mhz, e->excess_db, e->peak_dbfs, (e->last_ms - e->start_ms) / 1000,
-                     msg.kind == REPORT_END ? "ended" : "ongoing");
+            snprintf(remarks, sizeof(remarks), "%s, %s: %.1f-%.1f MHz, %.0f dB above usual, peak %.0f dBFS, %.0f s (%s)",
+                     detector_type_name(e->type), rule, e->lo_mhz, e->hi_mhz, e->excess_db, e->peak_dbfs,
+                     (e->last_ms - e->start_ms) / 1000, msg.kind == REPORT_END ? "ended" : "ongoing");
             /* An ended event goes stale at once, so TAK clears it. */
             if (cot_send(cot, &c, uid, "a-u-G", callsign, remarks, msg.kind == REPORT_END ? 0 : EVENT_STALE_S)) {
                 xSemaphoreTake(lock, portMAX_DELAY);

@@ -67,7 +67,60 @@ struct track {
     unsigned seen, total;
     int event;                    /* index in events[], or -1 */
     double reported_ms;
+    /* For the features: sums over sightings. */
+    unsigned n, wifi;
+    double c, c2, w, w2;
 };
+
+/* ---- classification ----------------------------------------------------------------- */
+
+static const char *const type_names[TYPE_COUNT] = {
+    [TYPE_UNCLASSIFIED] = "unclassified", [TYPE_WIFI] = "Wi-Fi-like", [TYPE_WIDE] = "very wide (jammer-like)",
+    [TYPE_WANDERING] = "wandering (microwave-like)", [TYPE_STEADY] = "steady wideband (video-like)",
+};
+
+const char *detector_type_name(unsigned type) { return type < TYPE_COUNT ? type_names[type] : ""; }
+
+/* A sighting on the Wi-Fi channel grid (2412 + 5k MHz), 20 or 40 MHz wide. */
+static bool wifi_shaped(float lo, float hi)
+{
+    float c = (lo + hi) / 2, w = hi - lo;
+    float off = fmodf(c - 2412.0f, 5.0f);
+    if (off > 2.5f)
+        off -= 5.0f;
+    if (off < -2.5f)
+        off += 5.0f;
+    return c > 2400 && c < 2485 && fabsf(off) <= 1.25f && ((w >= 14 && w <= 22) || (w >= 32 && w <= 42));
+}
+
+static void features(const struct track *t, struct detector_features *f)
+{
+    double n = t->n ? t->n : 1;
+    f->samples = t->n;
+    f->center_mhz = (float)(t->c / n);
+    f->center_sd_mhz = (float)sqrt(fmax(0, t->c2 / n - (t->c / n) * (t->c / n)));
+    f->width_mhz = (float)(t->w / n);
+    f->width_sd_mhz = (float)sqrt(fmax(0, t->w2 / n - (t->w / n) * (t->w / n)));
+    f->duty = t->total ? (float)t->seen / t->total : 0;
+    f->wifi_share = t->n ? (float)t->wifi / t->n : 0;
+}
+
+/* Explicit rules, in order; they say what an event looks like, not what it is. */
+static uint8_t classify(const struct detector_features *f)
+{
+    if (f->samples < 5)
+        return TYPE_UNCLASSIFIED;
+    if (f->wifi_share >= 0.6f)
+        return TYPE_WIFI;
+    if (f->width_mhz >= 30)
+        return TYPE_WIDE;
+    /* An oven's magnetron drifts tens of MHz; a few MHz is merged bursts. */
+    if (f->center_sd_mhz > 5 && f->samples >= 10)
+        return TYPE_WANDERING;
+    if (f->duty >= 0.9f && f->width_sd_mhz < 2)
+        return TYPE_STEADY;
+    return TYPE_UNCLASSIFIED;
+}
 
 struct report {
     enum detector_report kind;
@@ -181,6 +234,8 @@ static int open_event(struct track *t, double now)
         .id = next_id++, .rule = t->rule, .active = true, .start_ms = t->first_ms, .last_ms = now,
         .lo_mhz = t->lo, .hi_mhz = t->hi, .peak_dbfs = t->peak, .excess_db = t->excess,
     };
+    features(t, &events[i].f);
+    events[i].type = classify(&events[i].f);
     events_head = (events_head + 1) % EVENTS;
     if (events_count < EVENTS)
         events_count++;
@@ -323,8 +378,16 @@ void detector_line(const struct line *l)
                 *m = (struct track){ .used = true, .rule = r, .first_ms = now, .total = 1, .event = -1,
                                      .lo = lo, .hi = hi, .peak = -INFINITY, .excess = -INFINITY };
             }
-            if (!m->hit)
+            if (!m->hit) {
                 m->seen++;
+                float c = (lo + hi) / 2, w = hi - lo;
+                m->n++;
+                m->c += c;
+                m->c2 += (double)c * c;
+                m->w += w;
+                m->w2 += (double)w * w;
+                m->wifi += wifi_shaped(lo, hi);
+            }
             m->hit = true;
             m->last_ms = now;
             if (exc >= m->excess) {    /* keep the range seen at its strongest */
@@ -369,6 +432,8 @@ void detector_line(const struct line *l)
         struct detector_event *e = &events[m->event];
         e->last_ms = m->last_ms;
         e->peak_dbfs = fmaxf(e->peak_dbfs, m->peak);
+        features(m, &e->f);
+        e->type = classify(&e->f);
         if (m->excess > e->excess_db) {
             e->excess_db = m->excess;
             e->lo_mhz = m->lo;
@@ -417,9 +482,9 @@ static void reporter(void *arg)
         if (xQueueReceive(reports, &r, portMAX_DELAY) != pdTRUE)
             continue;
         const struct detector_event *e = &r.e;
-        ESP_LOGI(TAG, "event %lu %s: %.1f-%.1f MHz, peak %.1f dBFS, %.1f dB over the floor, %.1f s",
-                 (unsigned long)e->id, kinds[r.kind], e->lo_mhz, e->hi_mhz, e->peak_dbfs, e->excess_db,
-                 (e->last_ms - e->start_ms) / 1000);
+        ESP_LOGI(TAG, "event %lu %s: %.1f-%.1f MHz, %s, peak %.1f dBFS, %.1f dB above usual, %.1f s",
+                 (unsigned long)e->id, kinds[r.kind], e->lo_mhz, e->hi_mhz, detector_type_name(e->type),
+                 e->peak_dbfs, e->excess_db, (e->last_ms - e->start_ms) / 1000);
         struct storage_status st;
         storage_status(&st);
         if (st.mounted) {
@@ -428,10 +493,14 @@ static void reporter(void *arg)
             utc(e->last_ms, last, sizeof(last));
             FILE *f = fopen(LOG_PATH, "a");
             if (f) {
-                fprintf(f, "{\"id\":%lu,\"kind\":\"%s\",\"rule\":\"%s\",\"start\":\"%s\",\"last\":\"%s\","
-                           "\"duration_s\":%.1f,\"lo_mhz\":%.2f,\"hi_mhz\":%.2f,\"peak_dbfs\":%.1f,\"excess_db\":%.1f}\n",
-                        (unsigned long)e->id, kinds[r.kind], detector_rule_name(e->rule), start, last,
-                        (e->last_ms - e->start_ms) / 1000, e->lo_mhz, e->hi_mhz, e->peak_dbfs, e->excess_db);
+                fprintf(f, "{\"id\":%lu,\"kind\":\"%s\",\"rule\":\"%s\",\"type\":\"%s\",\"start\":\"%s\","
+                           "\"last\":\"%s\",\"duration_s\":%.1f,\"lo_mhz\":%.2f,\"hi_mhz\":%.2f,\"peak_dbfs\":%.1f,"
+                           "\"excess_db\":%.1f,\"center_mhz\":%.2f,\"center_sd_mhz\":%.2f,\"width_mhz\":%.2f,"
+                           "\"width_sd_mhz\":%.2f,\"duty\":%.2f,\"wifi_share\":%.2f,\"samples\":%lu}\n",
+                        (unsigned long)e->id, kinds[r.kind], detector_rule_name(e->rule), detector_type_name(e->type),
+                        start, last, (e->last_ms - e->start_ms) / 1000, e->lo_mhz, e->hi_mhz, e->peak_dbfs,
+                        e->excess_db, e->f.center_mhz, e->f.center_sd_mhz, e->f.width_mhz, e->f.width_sd_mhz,
+                        e->f.duty, e->f.wifi_share, (unsigned long)e->f.samples);
                 fclose(f);
             }
         }

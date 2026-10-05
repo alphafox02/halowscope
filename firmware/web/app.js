@@ -502,7 +502,7 @@ function onEvent(m) {
     if (i >= 0) detector.events[i] = e;
     else detector.events.unshift(e);
     detector.events = detector.events.slice(0, 100);
-    if (m.kind === 'start') toast(`Detected: ${e.lo.toFixed(1)}–${e.hi.toFixed(1)} MHz, ${e.excess.toFixed(0)} dB above usual (${e.rule})`, 'warn');
+    if (m.kind === 'start') toast(`Detected: ${e.lo.toFixed(1)}–${e.hi.toFixed(1)} MHz, ${e.excess.toFixed(0)} dB above usual, ${e.type}`, 'warn');
     showEvents();
     dirty.overlay = true;
 }
@@ -565,7 +565,7 @@ function eventLabel(e) {
     const when = wallTime(e.start) || `${ago(boardNow() - e.start)} ago`;
     const length = Math.max(0, Math.round((e.last - e.start) / 1000));
     const dur = length < 60 ? `${length} s` : `${Math.floor(length / 60)} min ${length % 60} s`;
-    return `${when} · ${e.lo.toFixed(1)}–${e.hi.toFixed(1)} MHz · +${e.excess.toFixed(0)} dB · ${dur}`;
+    return `${when} · ${e.lo.toFixed(1)}–${e.hi.toFixed(1)} MHz · +${e.excess.toFixed(0)} dB · ${dur} · ${e.type}`;
 }
 
 function showEvents() {
@@ -579,7 +579,10 @@ function showEvents() {
         list.replaceChildren(...detector.events.map((e) => {
             const li = document.createElement('li');
             const b = Object.assign(document.createElement('button'), {type: 'button', textContent: eventLabel(e)});
-            b.title = `${e.rule}: show it in the waterfall`;
+            const f = e.features || {};
+            b.title = `${e.rule}: show it in the waterfall\nwidth ${f.width?.toFixed(1)} MHz (spread ${f.width_sd?.toFixed(1)}), ` +
+                      `centre ${f.center?.toFixed(1)} MHz (spread ${f.center_sd?.toFixed(1)}), present ${Math.round((f.duty || 0) * 100)} %, ` +
+                      `Wi-Fi-shaped ${Math.round((f.wifi_share || 0) * 100)} %`;
             if (e.active) b.classList.add('active');
             b.addEventListener('click', () => showEvent(e));
             li.append(b);
