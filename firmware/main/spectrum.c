@@ -387,6 +387,11 @@ static void count_frame(int64_t *last)
     *last = now;
 }
 
+/* Recent costs, to start another snapshot only when it and the end of the
+ * frame (dB conversion and publishing) still fit before the deadline. */
+static float snapshot_cost_us, finish_cost_us;
+static unsigned cost_size;
+
 /* One fixed-mode frame. */
 static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
 {
@@ -398,6 +403,10 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
 
     memset(power, 0, n * sizeof(float));
     memset(&cycles, 0, sizeof(cycles));
+    if (cost_size != n) {
+        snapshot_cost_us = finish_cost_us = 0;
+        cost_size = n;
+    }
     do {
         unsigned first;
         int64_t t = esp_timer_get_time();
@@ -417,7 +426,10 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
         snapshot_us = (uint32_t)(esp_timer_get_time() - t);
         /* Leave time for HaLow, lwIP and the web server. */
         vTaskDelay(1);
-    } while ((c->averaging == 0 || ffts < c->averaging) && esp_timer_get_time() < deadline && failures < 8);
+        float cost = (float)(esp_timer_get_time() - t);
+        snapshot_cost_us = snapshot_cost_us ? 0.8f * snapshot_cost_us + 0.2f * cost : cost;
+    } while ((c->averaging == 0 || ffts < c->averaging) && failures < 8 &&
+             esp_timer_get_time() + (int64_t)(snapshot_cost_us + finish_cost_us) <= deadline);
 
     int64_t work_end = esp_timer_get_time(), t_db = 0, t_pub = 0;
     if (ffts) {
@@ -427,6 +439,8 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
         web_publish(line, n, lo - rate / 2, lo + rate / 2, c->peak);
         t_pub = esp_timer_get_time();
         count_frame(last_frame);
+        float cost = (float)(t_pub - work_end);
+        finish_cost_us = finish_cost_us ? 0.8f * finish_cost_us + 0.2f * cost : cost;
     }
     int64_t busy = esp_timer_get_time() - start;
 
