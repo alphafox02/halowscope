@@ -50,7 +50,23 @@ SPI2_HOST, mode 0, 40 MHz, CS driven as a GPIO (spics_io_num -1). The order of
 the gpio_config calls and the struct fields match mmhal_wlan.c in
 morsemicro/halow.
 
+## TF card
+
+The stock firmware mounts the card with ESP-IDF's SDMMC host (not SPI mode)
+at `/sdcard` and saves camera images under `/sdcard/image`. From the slot
+and host settings it passes to `esp_vfs_fat_sdmmc_mount`:
+
+| Signal | GPIO |
+|---|---|
+| CLK | 15 |
+| CMD | 16 |
+| D0 | 11 |
+
+1-bit bus with the internal pull-ups enabled, 10 MHz clock, SDMMC slot 0,
+no formatting on a failed mount. The manual gives 32 GB as the largest
+card.
+
 ## Still open
 
-- Camera DVP pins, TF card pins, the blue data LED.
+- Camera DVP pins, the blue data LED.
 - Whether the S3's native USB (GPIO19/20) is wired anywhere.
