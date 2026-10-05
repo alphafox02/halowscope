@@ -48,6 +48,7 @@ Measured on the test board:
 | Live view | 80 MHz wide, 20 frames/s at any FFT size from 512 to 8192 points |
 | Full sweep, 2210 to 2790 MHz | about 0.16 s (6 sweeps/s) |
 | Retune | 2.5 ms once the PLL setting near that frequency is known, 25 ms the first time |
+| History | about 7 minutes in memory; with a TF card, about 1.3 GB a day, days on a 16 GB card |
 
 Snapshots mean the view is built from a small share of the samples (about
 1 % in the live view). Steady signals show as they are; short bursts can
@@ -141,6 +142,7 @@ The board stores the network and joins it. Other commands:
 |---|---|
 | `AT+CWJAP?` | stored network, link state and address |
 | `AT+RST` | restart |
+| `AT+SDFORMAT=YES` | erase the TF card and make one FAT32 partition across it |
 
 The board takes its address by DHCP and prints it on the console:
 
@@ -173,7 +175,14 @@ desktop or phone browser).
 
 - Tune: scroll or click the digits at the top, type a frequency, or
   double-click a signal in the plot.
-- Zoom with the wheel or a pinch, drag to pan, click to place a marker.
+- Zoom with the wheel or a pinch, drag sideways to pan, click to place a
+  marker.
+- **Go back in time**: drag the waterfall up or down, or scroll over the
+  time rail that appears on the waterfall's left edge when the pointer
+  comes near. Ctrl + wheel over the rail zooms time; its thin strip is an
+  overview of everything kept, and clicking it jumps there. Hovering a past
+  row shows its spectrum. End or *Back to live* returns. See
+  [History](#history).
 - **Sweep**: tick *Sweep* or pick a preset to step across a range.
   Double-clicking a signal leaves the sweep and tunes there.
 - **Receiver**: sample rate (80 or 16 Msps), analog width, baseband filter,
@@ -190,6 +199,31 @@ else takes over.
 
 The page has no password: anyone who can reach the board on the HaLow
 network can watch and retune it.
+
+## History
+
+The board records every spectrum line, whether or not anyone is watching,
+so a page opened after something happened can scroll back to it; a newly
+opened page shows the recent past in its waterfall straight away.
+
+- **In memory**: frames are merged by max-hold into a line every 100 ms or
+  so (a short burst survives) and the last several minutes are kept in
+  PSRAM, about 7 minutes of the live view.
+- **On a TF card**, if one is in: every line is archived as well, plus a
+  coarse line every 2 seconds for zoomed-out views, so history reaches back
+  hours and days and survives restarts. About 1.3 GB a day; when under 1 GB
+  is left, the oldest hours go first. The card is never formatted by
+  itself: use a FAT32 card (8 to 32 GB come that way), or erase one with
+  `AT+SDFORMAT=YES` on the serial console. Files are in `halowscope/` on
+  the card.
+- **Clock time**: with internet on the HaLow network the board sets its
+  clock by NTP, and the time rail shows clock times; without it, the first
+  browser to connect lends its clock. The card archive needs one of the two,
+  as it is indexed by time.
+
+Scrolling back asks the board for one row per screen line; over HaLow a
+full screen takes a few seconds to arrive and draws as it comes. History
+from the card loads more slowly than history in memory.
 
 ## Span, filter and width
 
@@ -223,7 +257,10 @@ choosing 80 Msps sets it back to 0. On the test board that lowered the
 - Reception was verified from 2356 to 2476 MHz; the rest of the range locks
   and shows signals but has not been checked against a known source.
 - Levels are dBFS, not calibrated to dBm.
-- The camera and TF card are not used.
+- History travels over HaLow: a screen of it takes a few seconds, and while
+  a large amount comes off the card the live view can pause for a few
+  seconds.
+- The camera is not used.
 
 ## Credits
 
