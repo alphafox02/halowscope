@@ -334,6 +334,21 @@ static unsigned analyse(const uint32_t *ring, unsigned first, unsigned n, unsign
  * order, as dB into out[]. Output bin j is RF = LO - rate/2 + j * rate/n;
  * with the LO-minus-RF convention that is FFT bin (n/2 - j) mod n.
  */
+/*
+ * 10 log10(x) for x > 0, from the float's exponent and a degree-4 polynomial
+ * for log2 of its mantissa: within 0.001 dB, far finer than the 0.5 dB steps
+ * the page shows, and several times faster than log10f.
+ */
+static inline float fast_db(float x)
+{
+    union { float f; uint32_t u; } v = { .f = x };
+    float e = (float)((int)((v.u >> 23) & 255) - 127);
+    v.u = (v.u & 0x7FFFFFu) | 0x3F800000u;
+    float m = v.f;
+    float l = (((-0.07914958f * m + 0.62880993f) * m - 2.08104467f) * m + 4.02835512f) * m - 2.49676657f;
+    return 3.01029996f * (e + l);
+}
+
 static void to_db(float *out, unsigned n, unsigned from, unsigned to, unsigned ffts, bool peak, bool notch,
                   double rate)
 {
@@ -341,9 +356,10 @@ static void to_db(float *out, unsigned n, unsigned from, unsigned to, unsigned f
     float scale = 1.0f / (512.0f * 512.0f * window_sum * window_sum);
     if (!peak && ffts)
         scale /= (float)ffts;
+    float offset = 10.0f * log10f(scale);
     for (unsigned j = from; j < to; j++) {
-        float p = power[(n / 2 - j) & (n - 1)] * scale;
-        out[j - from] = 10.0f * log10f(p + 1e-20f);
+        float p = power[(n / 2 - j) & (n - 1)];
+        out[j - from] = p > 0 ? fast_db(p) + offset : -200.0f;
     }
     if (!notch)
         return;
