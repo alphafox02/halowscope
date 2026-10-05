@@ -93,6 +93,7 @@ function connect() {
         link.last = performance.now();
         sendView();
         ping();
+        send({t: 'clock', ms: Date.now()});   // used by the board only without NTP
         showLink();
     };
     ws.onmessage = (event) => {
@@ -227,7 +228,7 @@ function onFrame(buffer) {
 // on the waterfall's left edge, shown when the pointer comes near, gives the
 // time and an overview strip of everything kept.
 
-const RAIL = 52, RAIL_RULER = 38;          // CSS pixels: the rail, and its label part
+const RAIL = 66, RAIL_RULER = 52;          // CSS pixels: the rail, and its label part (fits 14:32:05)
 const hist = {
     paused: false, top: 0, rowMs: 100,     // while paused: server time of the top row, and per row
     liveTop: 0, liveShift: 0,              // newest live frame; live rows pushed since a fill
@@ -393,6 +394,12 @@ function pausedSpectrum() {
                              display: row, target: row, peak: row, settled: true});
 }
 
+// Clock time of a board time, in this browser's time zone, if the board knows it.
+function wallTime(boardMs) {
+    const c = status && status.clock;
+    if (!c || !c.boot_epoch) return '';
+    return new Date(c.boot_epoch + boardMs).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+}
 const ago = (ms) => {
     const s = Math.max(0, Math.round(ms / 1000));
     if (s === 0) return 'now';
@@ -426,7 +433,8 @@ function drawRail(ctx, l) {
         ctx.fillStyle = 'rgba(160, 180, 200, 0.5)';
         ctx.fillRect(RAIL_RULER - 5, Math.round(y), 5, 1);
         ctx.fillStyle = 'rgba(200, 210, 220, 0.85)';
-        ctx.fillText(ago(a * 1000), RAIL_RULER - 7, y);
+        const clock = wallTime(now - a * 1000);
+        ctx.fillText(clock ? clock.replace(/^(\d+:\d+):(\d+).*$/, step < 60 ? '$1:$2' : '$1') : ago(a * 1000), RAIL_RULER - 7, y);
     }
     ctx.fillStyle = hist.paused ? '#f5b041' : '#3ecf8e';
     ctx.fillText(hist.paused ? ago(ageTop) : 'now', RAIL_RULER - 7, y0 + 8);
@@ -918,7 +926,11 @@ function drawOverlay() {
             if (marker !== null) text += `  Δ ${((frequencyAt(pointer.x) - marker) / 1e3).toFixed(1)} kHz`;
         } else if (pointer.y > l.spectrum + l.axis) {
             const t = renderer.rowTime(Math.floor(pointer.y - l.spectrum - l.axis));
-            if (t) text += `  ${((Date.now() + link.clockOffset - t) / 1000).toFixed(1)} s ago`;
+            if (t) {
+                text += `  ${((boardNow() - t) / 1000).toFixed(1)} s ago`;
+                const clock = wallTime(t);
+                if (clock) text += `  ${clock}`;
+            }
         }
         label(text, pointer.x, clamp(pointer.y - 18, 12, h - 12), '#e8eef5');
     }

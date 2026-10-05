@@ -16,6 +16,7 @@
  *     run    {v: bool}
  *     ping   {c}                       answered by pong {c, s}
  *     ack    {seq}                     frame received
+ *     clock  {ms}                      the browser's clock, used without NTP
  *     history  {id, top, row_ms, rows, start, stop, bins}  past rows
  *     overview {id, rows, groups, start, stop}  the whole history, averaged
  *   board -> browser
@@ -58,6 +59,7 @@
 #include "spectrum.h"
 #include "storage.h"
 #include "history.h"
+#include "wallclock.h"
 
 static const char *TAG = "web";
 
@@ -380,6 +382,11 @@ static void send_status(int fd)
     cJSON_AddNumberToObject(hi, "capacity", hs.capacity);
     cJSON_AddNumberToObject(hi, "line_ms", hs.line_ms);
 
+    cJSON *ck = cJSON_AddObjectToObject(j, "clock");
+    static const char *const sources[] = {"", "browser", "ntp"};
+    cJSON_AddStringToObject(ck, "source", sources[wallclock_source()]);
+    cJSON_AddNumberToObject(ck, "boot_epoch", wallclock_boot_epoch_ms());
+
     cJSON *d = cJSON_AddObjectToObject(j, "device");
     cJSON_AddStringToObject(d, "ip", ip);
     cJSON_AddNumberToObject(d, "rssi", hs_link_rssi());
@@ -630,6 +637,8 @@ static void on_message(int fd, const char *text)
         on_fft(j);
     } else if (strcmp(type, "sweep") == 0) {
         on_sweep(j);
+    } else if (strcmp(type, "clock") == 0) {
+        wallclock_offer(number(j, "ms", 0));
     } else if (strcmp(type, "history") == 0 || strcmp(type, "overview") == 0) {
         on_history(fd, j, strcmp(type, "overview") == 0);
     } else if (strcmp(type, "run") == 0) {

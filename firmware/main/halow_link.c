@@ -13,6 +13,7 @@
 #include "nvs.h"
 #include "mmhalow.h"
 #include "halowscope.h"
+#include "wallclock.h"
 
 static const char *TAG = "link";
 
@@ -119,6 +120,7 @@ static void on_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
         ip_event_got_ip_t *e = data;
         ip4 = e->ip_info.ip;
         link_up = true;
+        wallclock_start();
         ESP_LOGI(TAG, "IP " IPSTR ", open http://" IPSTR "/",
                  IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.ip));
     } else if (id == IP_EVENT_STA_LOST_IP) {
