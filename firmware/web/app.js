@@ -24,7 +24,7 @@ const DEFAULTS = {
     split: 0.42, maxFps: 0, maxKbps: 0, maxBins: -1,  // -1: automatic resolution
     railPinned: false,                       // keep the time rail on the waterfall's edge
     sidebar: window.innerWidth > 900,
-    open: {sweep: true, receiver: true, fft: false, display: false, device: true, link: false},
+    open: {sweep: true, detector: false, receiver: true, fft: false, display: false, device: true, link: false},
 };
 const prefs = (() => {
     try {
@@ -94,6 +94,7 @@ function connect() {
         sendView();
         ping();
         send({t: 'clock', ms: Date.now()});   // used by the board only without NTP
+        requestDetector();
         showLink();
     };
     ws.onmessage = (event) => {
@@ -168,6 +169,8 @@ function onMessage(m) {
     if (m.t === 'status') onStatus(m);
     else if (m.t === 'hello') onHello(m);
     else if (m.t === 'notice') toast(m.text, 'bad');
+    else if (m.t === 'detector') onDetector(m);
+    else if (m.t === 'event') onEvent(m);
     else if (m.t === 'pong') {
         const now = performance.now();
         link.rtt = now - m.c;
@@ -463,12 +466,147 @@ function drawRail(ctx, l) {
             }
         }
     }
+    drawEventMarks(ctx, y0, h, now, top, rowMs, total);
     // Box: the part of the history on screen.
     const yTop = clamp(y0 + ((now - top) / total) * h, y0, y0 + h - 3);
     const yBottom = clamp(y0 + ((now - (top - h * rowMs)) / total) * h, y0, y0 + h);
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1.5;
     ctx.strokeRect(sx + 0.75, yTop, sw - 1.5, Math.max(3, yBottom - yTop));
+}
+
+// ---- detector: new wideband emitters ---------------------------------------------------------------
+//
+// The board watches for emitters that stand out from what each frequency
+// usually shows, and reports events whether or not a page is open. Here:
+// its settings, the list of recent events (click one to see it in the
+// waterfall), a note when one starts, and marks on the time rail.
+
+const detector = {config: null, events: [], editing: -Infinity};   // editing: when the user last typed
+
+function requestDetector() { send({t: 'detector'}); }
+
+function onDetector(m) {
+    detector.events = m.events || [];
+    if (performance.now() - detector.editing > 3000) {   // not while the user is typing
+        detector.config = m.config;
+        showDetectorConfig();
+    }
+    showEvents();
+}
+
+function onEvent(m) {
+    const e = m.event, i = detector.events.findIndex((x) => x.id === e.id);
+    if (i >= 0) detector.events[i] = e;
+    else detector.events.unshift(e);
+    detector.events = detector.events.slice(0, 100);
+    if (m.kind === 'start') toast(`Detected: ${e.lo.toFixed(1)}–${e.hi.toFixed(1)} MHz, ${e.excess.toFixed(0)} dB above usual (${e.rule})`, 'warn');
+    showEvents();
+    dirty.overlay = true;
+}
+
+// Each field reads as part of a sentence: text before, the value, text after.
+const RULE_FIELDS = [['start', 'from', ''], ['stop', 'to', 'MHz'], ['threshold', '', 'dB above usual'],
+                     ['min_bw', 'at least', 'MHz wide'], ['min_s', 'for at least', 's']];
+
+function showDetectorConfig() {
+    const c = detector.config;
+    if (!c) return;
+    $('det-on').checked = c.on;
+    $('det-learn').value = String(c.learn_min);
+    const box = $('det-rules');
+    box.replaceChildren(...c.rules.map((r, k) => {
+        const row = document.createElement('div');
+        row.className = 'rule';
+        const head = document.createElement('label');
+        head.className = 'rule-head';
+        const on = Object.assign(document.createElement('input'), {type: 'checkbox', checked: r.on, id: `det-r${k}-on`});
+        const name = Object.assign(document.createElement('input'), {type: 'text', value: r.name, maxLength: 23,
+                                                                     id: `det-r${k}-name`, className: 'rule-name'});
+        name.setAttribute('aria-label', `Rule ${k + 1} name`);
+        head.append(on, name);
+        const fields = document.createElement('div');
+        fields.className = 'rule-fields';
+        for (const [key, before, after] of RULE_FIELDS) {
+            const span = document.createElement('label');
+            const input = Object.assign(document.createElement('input'), {type: 'text', inputMode: 'decimal',
+                                                                          value: String(r[key]), id: `det-r${k}-${key}`});
+            span.append(...[before && `${before} `, input, after && ` ${after}`].filter(Boolean));
+            fields.append(span);
+        }
+        row.append(head, fields);
+        return row;
+    }));
+}
+
+function readDetectorConfig() {
+    const c = structuredClone(detector.config);
+    c.on = $('det-on').checked;
+    c.learn_min = Number($('det-learn').value);
+    c.rules.forEach((r, k) => {
+        r.on = $(`det-r${k}-on`).checked;
+        r.name = $(`det-r${k}-name`).value.trim() || `Rule ${k + 1}`;
+        for (const [key] of RULE_FIELDS) r[key] = Number($(`det-r${k}-${key}`).value);
+    });
+    return c;
+}
+
+$('panel-detector').addEventListener('input', () => { detector.editing = performance.now(); });
+$('det-save').addEventListener('click', () => {
+    if (!detector.config) return;
+    detector.editing = -Infinity;
+    if (send({t: 'detector', config: readDetectorConfig()})) toast('Detector settings saved on the board.');
+    else toast('Not connected.', 'bad');
+});
+
+function eventLabel(e) {
+    const when = wallTime(e.start) || `${ago(boardNow() - e.start)} ago`;
+    const length = Math.max(0, Math.round((e.last - e.start) / 1000));
+    const dur = length < 60 ? `${length} s` : `${Math.floor(length / 60)} min ${length % 60} s`;
+    return `${when} · ${e.lo.toFixed(1)}–${e.hi.toFixed(1)} MHz · +${e.excess.toFixed(0)} dB · ${dur}`;
+}
+
+function showEvents() {
+    const list = $('det-events');
+    if (!detector.events.length) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = 'None yet.';
+        list.replaceChildren(li);
+    } else {
+        list.replaceChildren(...detector.events.map((e) => {
+            const li = document.createElement('li');
+            const b = Object.assign(document.createElement('button'), {type: 'button', textContent: eventLabel(e)});
+            b.title = `${e.rule}: show it in the waterfall`;
+            if (e.active) b.classList.add('active');
+            b.addEventListener('click', () => showEvent(e));
+            li.append(b);
+            return li;
+        }));
+    }
+    const active = detector.events.filter((e) => e.active).length;
+    $('pill-det').hidden = !active;
+    $('pill-det').textContent = `${active} detection${active === 1 ? '' : 's'}`;
+}
+
+// Puts an event's start a third of the way down the waterfall.
+function showEvent(e) {
+    const info = historyInfo();
+    if (!info) return;
+    if (!hist.paused) hist.rowMs = Math.max(liveRowMs(), info.line_ms);
+    if (e.start < info.oldest) toast('That event is older than the history kept.', 'bad');
+    showTime(e.start + wfRows() * hist.rowMs / 3);
+}
+
+// Event marks on the time rail and in its overview strip.
+function drawEventMarks(ctx, y0, h, now, top, rowMs, total) {
+    ctx.fillStyle = '#ff9f40';
+    for (const e of detector.events) {
+        const y = y0 + (top - e.start) / rowMs;
+        if (y >= y0 && y <= y0 + h) ctx.fillRect(0, Math.round(y) - 1, RAIL_RULER - 8, 2);
+        const yo = y0 + ((now - e.start) / total) * h;
+        if (yo >= y0 && yo <= y0 + h) ctx.fillRect(RAIL - 4, Math.round(yo) - 1, 4, 3);
+    }
 }
 
 // ---- view ----------------------------------------------------------------------------------------------

@@ -26,6 +26,7 @@
     <span id="pill-link" class="pill" title="Connection to the server">connecting</span>
     <span id="pill-state" class="pill" title="Stream">&hellip;</span>
     <span id="pill-errors" class="pill" title="HaLow signal at the board">&hellip;</span>
+    <span id="pill-det" class="pill det" title="Detections going on now" hidden></span>
     <button id="live-btn" class="pill live-btn" type="button" hidden title="Back to the live view (End)">&#9654; Back to live</button>
   </div>
 </header>
@@ -44,6 +45,17 @@
         <button type="button" data-start="2210" data-stop="2790">Everything</button>
       </div>
       <p class="note">Each step retunes the LO and keeps the middle of one snapshot. Double-click a signal to tune there and leave the sweep. Reception was verified from 2356 to 2476 MHz; the PLL locks from about 2207 to 2795 MHz.</p>
+    </details>
+
+    <details id="panel-detector" data-panel="detector">
+      <summary>Detector</summary>
+      <div class="row check"><label><input id="det-on" type="checkbox"> Watch for new wideband emitters</label></div>
+      <div id="det-rules"></div>
+      <div class="row"><label for="det-learn">Normal after</label><input id="det-learn" type="text" inputmode="decimal"><span class="unit">min</span></div>
+      <div class="row buttons"><button id="det-save" type="button">Save on the board</button></div>
+      <p class="note">An event is something wider and stronger than what that frequency usually shows (a video link, a jammer), present most of the time for the set time. Each frequency learns its usual level; a signal that stays longer than "normal after" becomes usual. The board watches with or without this page open, and logs events to the TF card.</p>
+      <h3>Events</h3>
+      <ol id="det-events" class="events"></ol>
     </details>
 
     <details id="panel-receiver" data-panel="receiver">

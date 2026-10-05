@@ -233,3 +233,17 @@ dl.stats dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; 
 
 .live-btn { cursor: pointer; color: var(--warn); border-color: #6b4c1a; background: transparent; font: inherit; font-size: 12px; }
 .live-btn:hover { background: #2a2010; }
+
+.pill.det { color: #ff9f40; border-color: #6b4416; }
+.rule { border-top: 1px solid var(--line); padding: 6px 0; }
+.rule-head { display: flex; gap: 6px; align-items: center; }
+.rule-name { flex: 1; min-width: 0; }
+.rule-fields { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; color: var(--dim); font-size: 12px; }
+.rule-fields input { width: 4.5em; }
+ol.events { list-style: none; margin: 4px 0; padding: 0; max-height: 220px; overflow-y: auto; }
+ol.events li.empty { color: var(--dim); font-size: 12px; }
+ol.events button { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 3px 4px; border-radius: 4px; cursor: pointer;
+                   font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text); }
+ol.events button:hover, ol.events button:focus-visible { background: var(--panel-2); outline: 1px solid var(--line); }
+ol.events button.active { color: #ff9f40; }
+.toast.warn { border-left-color: var(--warn); }
