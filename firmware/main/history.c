@@ -12,6 +12,8 @@
  */
 
 #include "history.h"
+#include "history_line.h"
+#include "archive.h"
 
 #include <math.h>
 #include <string.h>
@@ -23,19 +25,9 @@
 
 static const char *TAG = "history";
 
-#define LINE_BINS 2048u
 #define LINE_MS 100
 #define RING_BYTES (6u * 1024u * 1024u)
-#define STEP_DB 0.5f      /* code 0: no data; code c: base + (c - 1) * STEP_DB */
-
-struct line {
-    int64_t t_us;
-    double start_hz, stop_hz;
-    float base;
-    uint16_t bins;
-    uint8_t peak, pad;
-    uint8_t code[LINE_BINS];
-};
+#define STEP_DB LINE_STEP_DB
 
 static struct line *ring;
 static unsigned capacity, head, count;    /* head: next slot to write */
@@ -88,6 +80,7 @@ static void flush(void)
         count++;
     xSemaphoreGive(lock);
     acc_have = false;
+    archive_line(l);
 }
 
 void history_record(const float *db, unsigned bins, double start_hz, double stop_hz, bool peak)
@@ -134,6 +127,51 @@ void history_span(struct history_span *out)
         out->oldest_ms = ring[(head + capacity - count) % capacity].t_us / 1000.0;
     }
     xSemaphoreGive(lock);
+    double archived;
+    if (count && archive_oldest_ms(&archived) && archived < out->oldest_ms)
+        out->oldest_ms = archived;
+}
+
+int history_merge(const struct rows_request *r, const struct line *l, double t_ms)
+{
+    if (t_ms > r->top_ms)
+        return -1;
+    unsigned row = (unsigned)((r->top_ms - t_ms) / r->row_ms);
+    if (row >= r->rows)
+        return 1;
+    double line_bw = (l->stop_hz - l->start_hz) / l->bins, out_bw = (r->stop_hz - r->start_hz) / r->bins;
+    /* Line bins per output bin, and where output bin 0 starts, in line bins:
+     * single precision per bin, as the S3 has no double-precision FPU. */
+    float per = (float)(out_bw / line_bw);
+    float first = (float)((r->start_hz - l->start_hz) / line_bw);
+    float *out = r->out + (size_t)row * r->bins;
+    uint16_t *n = r->count ? r->count + (size_t)row * r->bins : NULL;
+    for (unsigned j = 0; j < r->bins; j++) {
+        float x0 = first + j * per, x1 = x0 + per;
+        if (x1 <= 0 || x0 >= l->bins)
+            continue;
+        int i0 = x0 < 0 ? 0 : (int)x0, i1 = (int)x1;
+        if (x1 > (float)i1)
+            i1++;
+        if (i1 > l->bins)
+            i1 = l->bins;
+        if (i1 <= i0)
+            i1 = i0 + 1;
+        uint8_t m = 0;
+        for (int i = i0; i < i1; i++)
+            if (l->code[i] > m)
+                m = l->code[i];
+        if (!m)
+            continue;
+        float v = l->base + (m - 1) * STEP_DB;
+        if (n) {
+            out[j] = n[j] ? out[j] + v : v;
+            n[j]++;
+        } else if (isnan(out[j]) || v > out[j]) {
+            out[j] = v;
+        }
+    }
+    return 0;
 }
 
 bool history_rows(double top_ms, double row_ms, unsigned rows, double start_hz, double stop_hz,
@@ -143,62 +181,39 @@ bool history_rows(double top_ms, double row_ms, unsigned rows, double start_hz, 
         out[i] = NAN;
     if (!capacity || !rows || !bins || row_ms <= 0 || stop_hz <= start_hz)
         return false;
-    uint16_t *n = mean ? heap_caps_calloc((size_t)rows * bins, sizeof(uint16_t), MALLOC_CAP_SPIRAM) : NULL;
-    if (mean && !n)
-        return false;
+    struct rows_request r = { .top_ms = top_ms, .row_ms = row_ms, .rows = rows, .bins = bins,
+                              .start_hz = start_hz, .stop_hz = stop_hz, .out = out };
+    if (mean) {
+        r.count = heap_caps_calloc((size_t)rows * bins, sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+        if (!r.count)
+            return false;
+    }
 
     /* Only the index is read under the lock; a slot that is overwritten while
      * we read it is the oldest one, at the far end of any window. */
     xSemaphoreTake(lock, portMAX_DELAY);
     unsigned h = head, c = count;
     xSemaphoreGive(lock);
+    double oldest_ram = c ? ring[(h + capacity - c) % capacity].t_us / 1000.0 : INFINITY;
 
-    double out_bw = (stop_hz - start_hz) / bins;
+    /* At a second or more per row the card's coarse archive serves as much of
+     * the window as it covers (far less to read); PSRAM serves what is newer. */
+    double coarse_until = row_ms >= 1000 ? archive_rows(&r, true, INFINITY) : -INFINITY;
     for (unsigned k = 0; k < c; k++) {
         const struct line *l = &ring[(h + capacity - 1 - k) % capacity];
         double t = l->t_us / 1000.0;
-        if (t > top_ms)
-            continue;
-        unsigned r = (unsigned)((top_ms - t) / row_ms);
-        if (r >= rows)
-            break;                       /* lines only get older from here */
-        double line_bw = (l->stop_hz - l->start_hz) / l->bins;
-        /* Line bins per output bin, and where output bin 0 starts, in line bins. */
-        float per = (float)(out_bw / line_bw);
-        float first = (float)((start_hz - l->start_hz) / line_bw);
-        float *row = out + (size_t)r * bins;
-        uint16_t *rn = n ? n + (size_t)r * bins : NULL;
-        for (unsigned j = 0; j < bins; j++) {
-            float x0 = first + j * per, x1 = x0 + per;
-            if (x1 <= 0 || x0 >= l->bins)
-                continue;
-            int i0 = x0 < 0 ? 0 : (int)x0, i1 = (int)x1;
-            if (x1 > (float)i1)
-                i1++;
-            if (i1 > l->bins)
-                i1 = l->bins;
-            if (i1 <= i0)
-                i1 = i0 + 1;
-            uint8_t m = 0;
-            for (int i = i0; i < i1; i++)
-                if (l->code[i] > m)
-                    m = l->code[i];
-            if (!m)
-                continue;
-            float v = l->base + (m - 1) * STEP_DB;
-            if (rn) {
-                row[j] = rn[j] ? row[j] + v : v;
-                rn[j]++;
-            } else if (isnan(row[j]) || v > row[j]) {
-                row[j] = v;
-            }
-        }
+        if (t <= coarse_until || history_merge(&r, l, t) > 0)
+            break;
     }
-    if (n) {
+    /* Older than PSRAM reaches, at finer than a second per row: the fine archive. */
+    if (row_ms < 1000 && top_ms - rows * row_ms < oldest_ram)
+        archive_rows(&r, false, oldest_ram);
+
+    if (r.count) {
         for (unsigned i = 0; i < rows * bins; i++)
-            if (n[i])
-                out[i] /= n[i];
-        heap_caps_free(n);
+            if (r.count[i])
+                out[i] /= r.count[i];
+        heap_caps_free(r.count);
     }
     return c > 0;
 }

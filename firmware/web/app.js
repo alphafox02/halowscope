@@ -150,7 +150,9 @@ function ping() { send({t: 'ping', c: performance.now()}); }
 
 setInterval(() => {
     if (link.state === 'live') {
-        if (performance.now() - link.last > 5000) abandon();
+        // Status arrives twice a second; a HaLow stall can hold everything for
+        // several seconds, so only a long silence means the link is gone.
+        if (performance.now() - link.last > 15000) abandon();
         else ping();
     }
     showLink();
@@ -398,7 +400,8 @@ function pausedSpectrum() {
 function wallTime(boardMs) {
     const c = status && status.clock;
     if (!c || !c.boot_epoch) return '';
-    return new Date(c.boot_epoch + boardMs).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    return new Date(c.boot_epoch + boardMs).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit',
+                                                                     hourCycle: 'h23'});
 }
 const ago = (ms) => {
     const s = Math.max(0, Math.round(ms / 1000));

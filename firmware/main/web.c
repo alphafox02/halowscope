@@ -49,17 +49,20 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "halowscope.h"
 #include "radio.h"
 #include "spectrum.h"
 #include "storage.h"
 #include "history.h"
 #include "wallclock.h"
+#include "archive.h"
 
 static const char *TAG = "web";
 
@@ -107,10 +110,16 @@ static void send_work(void *arg)
 {
     struct outgoing *o = arg;
     httpd_ws_frame_t f = { .final = true, .type = o->type, .payload = o->data, .len = o->len };
+    bool failed = false;
     if (o->fd == client_fd || o->type == HTTPD_WS_TYPE_CLOSE)
-        httpd_ws_send_frame_async(server, o->fd, &f);
-    if (o->type == HTTPD_WS_TYPE_CLOSE)
+        failed = httpd_ws_send_frame_async(server, o->fd, &f) != ESP_OK;
+    /* A send that failed part way leaves the stream out of step: close it, and
+     * the page reconnects, rather than going on with garbage. */
+    if (o->type == HTTPD_WS_TYPE_CLOSE || failed) {
+        if (failed)
+            ESP_LOGW(TAG, "send failed, closing the connection");
         httpd_sess_trigger_close(server, o->fd);
+    }
     if (o->sent)
         xSemaphoreGive(o->sent);
     free(o);
@@ -371,6 +380,8 @@ static void send_status(int fd)
         cJSON_AddBoolToObject(sd, "test_ok", st.test_ok);
         cJSON_AddNumberToObject(sd, "write_kbps", st.write_kbps);
         cJSON_AddNumberToObject(sd, "read_kbps", st.read_kbps);
+        cJSON_AddBoolToObject(sd, "archiving", archive_running());
+        cJSON_AddNumberToObject(sd, "dropped", archive_dropped());
     }
 
     struct history_span hs;
@@ -394,6 +405,14 @@ static void send_status(int fd)
     cJSON_AddNumberToObject(d, "heap_min", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(d, "psram", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddNumberToObject(d, "uptime", esp_timer_get_time() / 1e6);
+    static const char *const resets[] = {
+        [ESP_RST_UNKNOWN] = "unknown", [ESP_RST_POWERON] = "power on", [ESP_RST_EXT] = "reset pin",
+        [ESP_RST_SW] = "restart", [ESP_RST_PANIC] = "crash", [ESP_RST_INT_WDT] = "interrupt watchdog",
+        [ESP_RST_TASK_WDT] = "task watchdog", [ESP_RST_WDT] = "watchdog", [ESP_RST_DEEPSLEEP] = "deep sleep",
+        [ESP_RST_BROWNOUT] = "brownout", [ESP_RST_SDIO] = "SDIO",
+    };
+    esp_reset_reason_t why = esp_reset_reason();
+    cJSON_AddStringToObject(d, "last_reset", why < sizeof(resets) / sizeof(resets[0]) && resets[why] ? resets[why] : "other");
     send_json(fd, j);
 }
 
@@ -480,7 +499,9 @@ static TaskHandle_t history_task_handle;
 
 #define HISTORY_MAX_ROWS 2048u
 #define HISTORY_MAX_BINS 1024u
-#define HISTORY_CHUNK_ROWS 16u
+/* About 4 KB a message, so live frames interleave on a slow link: 4 rows of
+ * 1024 bins, or the whole overview of a narrow strip in one or two. */
+#define HISTORY_CHUNK_BYTES 4096u
 #define HISTORY_HEADER 56u
 
 static void on_history(int fd, const cJSON *j, bool overview)
@@ -514,12 +535,15 @@ static void on_history(int fd, const cJSON *j, bool overview)
 /* Builds the rows a chunk at a time and sends each chunk, one in flight. */
 static void serve_history(const struct history_request *r)
 {
-    float *rows = heap_caps_malloc(HISTORY_CHUNK_ROWS * r->bins * sizeof(float), MALLOC_CAP_SPIRAM);
-    uint8_t *msg = heap_caps_malloc(HISTORY_HEADER + HISTORY_CHUNK_ROWS * r->bins, MALLOC_CAP_SPIRAM);
+    unsigned chunk = HISTORY_CHUNK_BYTES / r->bins;
+    if (chunk < 1)
+        chunk = 1;
+    float *rows = heap_caps_malloc(chunk * r->bins * sizeof(float), MALLOC_CAP_SPIRAM);
+    uint8_t *msg = heap_caps_malloc(HISTORY_HEADER + chunk * r->bins, MALLOC_CAP_SPIRAM);
     if (!rows || !msg)
         goto done;
-    for (unsigned row0 = 0; row0 < r->rows; row0 += HISTORY_CHUNK_ROWS) {
-        unsigned n = r->rows - row0 < HISTORY_CHUNK_ROWS ? r->rows - row0 : HISTORY_CHUNK_ROWS;
+    for (unsigned row0 = 0; row0 < r->rows; row0 += chunk) {
+        unsigned n = r->rows - row0 < chunk ? r->rows - row0 : chunk;
         double top = r->top_ms - row0 * r->row_ms;
         history_rows(top, r->row_ms, n, r->start_hz, r->stop_hz, r->bins, r->overview, rows);
         float low = INFINITY, high = -INFINITY;
@@ -757,6 +781,12 @@ void hs_web_start(void)
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
     cfg.close_fn = on_close;
+    /* HaLow can stall for seconds (a lost packet waits for TCP's retransmit
+     * timer); wait that out rather than abandon a frame half sent. */
+    cfg.send_wait_timeout = 20;
+    /* Stacks of tasks that never write to the flash chip can live in PSRAM,
+     * keeping internal RAM for HaLow and the network stack. */
+    cfg.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     if (!pending.db || httpd_start(&server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "web server failed to start");
         return;
@@ -769,8 +799,9 @@ void hs_web_start(void)
     httpd_uri_t ws = { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true,
                        .ws_post_handshake_cb = ws_connected };
     httpd_register_uri_handler(server, &ws);
-    xTaskCreate(status_task, "wsstatus", 4096, NULL, 2, NULL);
+    xTaskCreateWithCaps(status_task, "wsstatus", 4096, NULL, 2, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     history_lock = xSemaphoreCreateMutex();
     history_sent = xSemaphoreCreateBinary();
-    xTaskCreate(history_task, "history", 4096, NULL, 2, &history_task_handle);
+    xTaskCreateWithCaps(history_task, "history", 5120, NULL, 2, &history_task_handle,
+                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
