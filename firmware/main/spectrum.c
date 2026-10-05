@@ -489,19 +489,37 @@ static void fixed_frame(const struct fft_config *c, int64_t *last_frame)
     xSemaphoreGive(status_lock);
 }
 
-/* One sweep: LO steps across [start, stop], one frame for all of it. */
+/* The LO for step s of a sweep grid, kept inside the PLL's range. */
+static double sweep_lo(double start, double step, unsigned s)
+{
+    double lo = start + (s + 0.5) * step;
+    return lo < RADIO_LO_MIN_HZ ? RADIO_LO_MIN_HZ : lo > RADIO_LO_MAX_HZ ? RADIO_LO_MAX_HZ : lo;
+}
+
+/*
+ * One sweep: LO steps across [start, stop], one frame for all of it.
+ *
+ * Each step keeps the middle of its capture, centred on the LO it actually
+ * tuned to. Near the ends of the PLL's range a step's LO is clamped, so its
+ * bins are placed by that LO, not by the step's place in the grid: the frame
+ * runs from the first LO minus half a step to the last LO plus half a step,
+ * and a clamped step overlaps its neighbour instead of being drawn where it
+ * did not look.
+ */
 static void sweep_frame(const struct fft_config *c, const struct sweep_config *sw, int64_t *last_frame)
 {
     double rate = radio_sample_rate();
     unsigned n = c->size;
     double bin_hz = rate / n;
     unsigned keep = (unsigned)(SWEEP_KEEP * n) & ~1u;    /* bins kept per step, centred */
-    double step = keep * bin_hz;
+    double step = keep * bin_hz, half = keep / 2 * bin_hz;
     double start = sw->start_hz, stop = sw->stop_hz;
     if (stop - start < step)
         stop = start + step;
     unsigned steps = (unsigned)ceil((stop - start) / step);
-    unsigned total = steps * keep;
+    double frame_start = sweep_lo(start, step, 0) - half;
+    double frame_stop = sweep_lo(start, step, steps - 1) + half;
+    unsigned total = (unsigned)llround((frame_stop - frame_start) / bin_hz);
     if (total > MAX_SWEEP_BINS) {
         web_notice("Sweep too fine: use a smaller FFT size or a narrower range.");
         xSemaphoreTake(status_lock, portMAX_DELAY);
@@ -514,16 +532,18 @@ static void sweep_frame(const struct fft_config *c, const struct sweep_config *s
     unsigned failures = 0;
 
     for (unsigned s = 0; s < steps; s++) {
-        /* The LO sits at the middle of the kept bins of this step. */
-        double lo = start + (s + 0.5) * step;
-        if (lo < RADIO_LO_MIN_HZ)
-            lo = RADIO_LO_MIN_HZ;
-        if (lo > RADIO_LO_MAX_HZ)
-            lo = RADIO_LO_MAX_HZ;
+        double lo = sweep_lo(start, step, s);
+        /* Where this step's kept bins go in the frame. */
+        long at = lround((lo - half - frame_start) / bin_hz);
+        if (at < 0)
+            at = 0;
+        if (at + keep > total)
+            at = total - keep;
+        float *out = line + at;
         int64_t t = esp_timer_get_time();
         if (radio_tune((uint32_t)lo) != RADIO_OK) {
             for (unsigned j = 0; j < keep; j++)
-                line[s * keep + j] = -200.0f;
+                out[j] = -200.0f;
             continue;
         }
         retune_us = (uint32_t)(esp_timer_get_time() - t);
@@ -540,21 +560,21 @@ static void sweep_frame(const struct fft_config *c, const struct sweep_config *s
             failures++;
         }
         if (ffts)
-            to_db(line + s * keep, n, n / 2 - keep / 2, n / 2 + keep / 2, ffts, c->peak, true, rate);
+            to_db(out, n, n / 2 - keep / 2, n / 2 + keep / 2, ffts, c->peak, true, rate);
         else
             for (unsigned j = 0; j < keep; j++)
-                line[s * keep + j] = -200.0f;
+                out[j] = -200.0f;
         vTaskDelay(1);
 
         /* A setting or a stop arriving mid-sweep ends this sweep early. */
         if (uxQueueMessagesWaiting(requests))
             return;
     }
-    web_publish(line, total, start, start + total * bin_hz, c->peak);
+    web_publish(line, total, frame_start, frame_start + total * bin_hz, c->peak);
     count_frame(last_frame);
 
     xSemaphoreTake(status_lock, portMAX_DELAY);
-    status.centre_hz = start + total * bin_hz / 2;
+    status.centre_hz = frame_start + total * bin_hz / 2;
     status.span_hz = total * bin_hz;
     status.fps = fps_estimate;
     status.coverage = 0;
