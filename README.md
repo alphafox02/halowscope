@@ -45,11 +45,11 @@ Measured on the test board:
 
 | | |
 |---|---|
-| Live view | 80 MHz wide, about 13 frames/s at 2048-point FFTs |
-| Full sweep, 2210 to 2790 MHz | about 0.23 s (4 sweeps/s) |
+| Live view | 80 MHz wide, 20 frames/s at any FFT size from 512 to 8192 points |
+| Full sweep, 2210 to 2790 MHz | about 0.16 s (6 sweeps/s) |
 | Retune | 2.5 ms once the PLL setting near that frequency is known, 25 ms the first time |
 
-Snapshots mean the view is built from a small share of the samples (under
+Snapshots mean the view is built from a small share of the samples (about
 1 % in the live view). Steady signals show as they are; short bursts can
 fall between snapshots, and the peak detector helps to catch them.
 
