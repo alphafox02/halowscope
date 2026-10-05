@@ -246,4 +246,10 @@ ol.events button { all: unset; display: block; width: 100%; box-sizing: border-b
                    font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text); }
 ol.events button:hover, ol.events button:focus-visible { background: var(--panel-2); outline: 1px solid var(--line); }
 ol.events button.active { color: #ff9f40; }
+ol.fw-list { list-style: none; margin: 4px 0; padding: 0; }
+ol.fw-list li { border-top: 1px solid var(--line); padding: 5px 0; font-size: 12px; }
+ol.fw-list li.empty { color: var(--dim); border-top: 0; }
+ol.fw-list .fw-what { color: var(--dim); }
+ol.fw-list .fw-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+#fw-file { min-width: 0; flex: 1; font-size: 12px; }
 .toast.warn { border-left-color: var(--warn); }

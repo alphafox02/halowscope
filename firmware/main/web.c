@@ -23,6 +23,11 @@
  *                                      outputs {config} (never the password)
  *     history  {id, top, row_ms, rows, start, stop, bins}  past rows
  *     overview {id, rows, groups, start, stop}  the whole history, averaged
+ *     firmware {install?: {file, slot}, boot?: {slot, keep}, remove?: file}
+ *                                      firmware slots; answered by firmware
+ *                                      {slots, files, card}; progress is in
+ *                                      the status
+ *   POST /firmware?name=<file.bin>     saves the body to the card's /firmware
  *   board -> browser
  *     hello, status, notice, pong (JSON), and spectrum frames (binary):
  *       u8 1, u8 flags (1: peak detector), u16 bins, u32 sequence,
@@ -49,6 +54,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -69,6 +75,7 @@
 #include "archive.h"
 #include "detector.h"
 #include "outputs.h"
+#include "flasher.h"
 
 static const char *TAG = "web";
 
@@ -417,6 +424,13 @@ static void send_status(int fd)
     cJSON_AddStringToObject(ou, "cot", os.cot);
     cJSON_AddNumberToObject(ou, "mqtt_sent", os.mqtt_sent);
     cJSON_AddNumberToObject(ou, "cot_sent", os.cot_sent);
+
+    struct flasher_status fs;
+    flasher_status(&fs);
+    cJSON *fw = cJSON_AddObjectToObject(j, "firmware");
+    cJSON_AddBoolToObject(fw, "busy", fs.busy);
+    cJSON_AddNumberToObject(fw, "percent", fs.percent);
+    cJSON_AddStringToObject(fw, "text", fs.text);
 
     cJSON *d = cJSON_AddObjectToObject(j, "device");
     cJSON_AddStringToObject(d, "ip", ip);
@@ -798,6 +812,119 @@ static void on_outputs(int fd, const cJSON *j)
     send_outputs(fd);
 }
 
+static cJSON *app_json(const struct flasher_app *a)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "project", a->project);
+    cJSON_AddStringToObject(o, "version", a->version);
+    cJSON_AddStringToObject(o, "date", a->date);
+    cJSON_AddStringToObject(o, "idf", a->idf);
+    return o;
+}
+
+static void send_firmware(int fd)
+{
+    struct flasher_slot *slots = heap_caps_malloc(FLASHER_SLOTS * sizeof(*slots), MALLOC_CAP_SPIRAM);
+    struct flasher_file *files = heap_caps_malloc(FLASHER_FILES * sizeof(*files), MALLOC_CAP_SPIRAM);
+    if (!slots || !files) {
+        free(slots);
+        free(files);
+        return;
+    }
+    unsigned ns = flasher_slots(slots), nf = 0;
+    bool card = flasher_files(files, FLASHER_FILES, &nf);
+
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "t", "firmware");
+    cJSON_AddBoolToObject(j, "card", card);
+    cJSON *sl = cJSON_AddArrayToObject(j, "slots");
+    for (unsigned i = 0; i < ns; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "label", slots[i].label);
+        cJSON_AddNumberToObject(o, "size", slots[i].size);
+        cJSON_AddBoolToObject(o, "running", slots[i].running);
+        cJSON_AddBoolToObject(o, "next", slots[i].next);
+        if (slots[i].has_app)
+            cJSON_AddItemToObject(o, "app", app_json(&slots[i].app));
+        cJSON_AddItemToArray(sl, o);
+    }
+    cJSON *fl = cJSON_AddArrayToObject(j, "files");
+    for (unsigned i = 0; i < nf; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", files[i].name);
+        cJSON_AddNumberToObject(o, "size", files[i].size);
+        if (files[i].ok)
+            cJSON_AddItemToObject(o, "app", app_json(&files[i].app));
+        cJSON_AddItemToArray(fl, o);
+    }
+    free(slots);
+    free(files);
+    send_json(fd, j);
+}
+
+static void on_firmware(int fd, const cJSON *j)
+{
+    const cJSON *in = cJSON_GetObjectItemCaseSensitive(j, "install");
+    const cJSON *boot = cJSON_GetObjectItemCaseSensitive(j, "boot");
+    const cJSON *rm = cJSON_GetObjectItemCaseSensitive(j, "remove");
+    char a[FLASHER_NAME_MAX] = "", b[20] = "";
+    if (cJSON_IsObject(in)) {
+        copy_string(in, "file", a, sizeof(a));
+        copy_string(in, "slot", b, sizeof(b));
+        flasher_install(a, b);
+    } else if (cJSON_IsObject(boot)) {
+        copy_string(boot, "slot", b, sizeof(b));
+        flasher_boot(b, cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(boot, "keep")));
+    } else if (cJSON_IsString(rm)) {
+        if (!flasher_remove(rm->valuestring))
+            web_notice("Could not remove that file.");
+    }
+    send_firmware(fd);
+}
+
+/* POST /firmware?name=<file.bin>: the body goes to the card's /firmware, via
+ * a temporary name so a broken upload never looks like a whole file. Holds
+ * the server (and the live view) while it runs. */
+static esp_err_t upload_handler(httpd_req_t *req)
+{
+    char query[128], name[FLASHER_NAME_MAX], path[sizeof(FLASHER_DIR) + FLASHER_NAME_MAX], part[sizeof(path) + 5];
+    struct storage_status st;
+    storage_status(&st);
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK || !flasher_path(name, path, sizeof(path)))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not a firmware file name (letters, digits, . _ -, ending in .bin).");
+    if (!st.mounted)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No TF card.");
+    if (req->content_len == 0 || req->content_len > 0x400000)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Too big for a firmware slot (4 MB).");
+    mkdir(FLASHER_DIR, 0775);
+    snprintf(part, sizeof(part), "%s.part", path);
+    FILE *f = fopen(part, "wb");
+    char *buf = malloc(4096);
+    bool ok = f && buf;
+    size_t left = req->content_len;
+    for (int timeouts = 0; ok && left;) {
+        int n = httpd_req_recv(req, buf, left < 4096 ? left : 4096);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3)
+            continue;
+        timeouts = 0;
+        ok = n > 0 && fwrite(buf, 1, n, f) == (size_t)n;
+        if (ok)
+            left -= n;
+    }
+    if (f && fclose(f) != 0)
+        ok = false;
+    free(buf);
+    if (!ok) {
+        unlink(part);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload failed: the card or the link.");
+    }
+    unlink(path);
+    rename(part, path);
+    ESP_LOGI(TAG, "firmware upload: %s, %u bytes", name, (unsigned)req->content_len);
+    return httpd_resp_sendstr(req, "Saved on the card.");
+}
+
 /* Event changes, from the detector's reporter task. */
 static void event_to_page(enum detector_report kind, const struct detector_event *e)
 {
@@ -860,6 +987,8 @@ static void on_message(int fd, const char *text)
         on_detector(fd, j);
     } else if (strcmp(type, "outputs") == 0) {
         on_outputs(fd, j);
+    } else if (strcmp(type, "firmware") == 0) {
+        on_firmware(fd, j);
     } else if (strcmp(type, "clock") == 0) {
         wallclock_offer(number(j, "ms", 0));
     } else if (strcmp(type, "history") == 0 || strcmp(type, "overview") == 0) {
@@ -983,6 +1112,7 @@ void hs_web_start(void)
     /* HaLow can stall for seconds (a lost packet waits for TCP's retransmit
      * timer); wait that out rather than abandon a frame half sent. */
     cfg.send_wait_timeout = 20;
+    cfg.recv_wait_timeout = 20;
     /* Stacks of tasks that never write to the flash chip can live in PSRAM,
      * keeping internal RAM for HaLow and the network stack. */
     cfg.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
@@ -998,6 +1128,8 @@ void hs_web_start(void)
     httpd_uri_t ws = { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true,
                        .ws_post_handshake_cb = ws_connected };
     httpd_register_uri_handler(server, &ws);
+    httpd_uri_t up = { .uri = "/firmware", .method = HTTP_POST, .handler = upload_handler };
+    httpd_register_uri_handler(server, &up);
     xTaskCreateWithCaps(status_task, "wsstatus", 4096, NULL, 2, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     history_lock = xSemaphoreCreateMutex();
     history_sent = xSemaphoreCreateBinary();

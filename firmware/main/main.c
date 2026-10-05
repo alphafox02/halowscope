@@ -17,6 +17,7 @@
 #include "detector.h"
 #include "settings.h"
 #include "outputs.h"
+#include "flasher.h"
 
 static const char *TAG = "halowscope";
 
@@ -38,6 +39,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    flasher_start();
     hs_console_start();
     hs_link_start();
     hs_web_start();

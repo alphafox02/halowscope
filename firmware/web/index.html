@@ -82,6 +82,17 @@
       <p class="note">MQTT: one small JSON message per event start, update (every 10 s while it lasts) and end, to <i>topic</i>/event; plain MQTT, no TLS. CoT: to a multicast group (TAK's usual is 239.2.3.1, port 6969) or one receiver's address; the node once a minute, and each event as a marker at the node's position, cleared when it ends; needs the position. Some routers and Wi-Fi networks do not pass multicast on: if TAK sees nothing, try a receiver's address. The password stays on the board and is never shown again.</p>
     </details>
 
+    <details id="panel-firmware" data-panel="firmware">
+      <summary>Firmware</summary>
+      <h3>Slots in flash</h3>
+      <ol id="fw-slots" class="fw-list"></ol>
+      <h3>On the TF card</h3>
+      <ol id="fw-files" class="fw-list"></ol>
+      <div class="row buttons"><input id="fw-file" type="file" accept=".bin" aria-label="Firmware file to upload"><button id="fw-upload" type="button">Upload</button></div>
+      <p class="note" id="fw-status"></p>
+      <p class="note">Other ESP-IDF firmware for this board (an app .bin, as built, not a full flash image) can be kept in the card's /firmware folder, written into a spare slot, and started. <b>Until restart</b>: any reset or power cycle comes back here, so it is safe to try. <b>Keep</b>: it starts at every boot; the way back is that firmware's own option if it has one, or over USB: <code>esptool erase-region 0x410000 0x2000</code> clears the choice and the board starts HaLowScope again. HaLowScope always stays in the factory slot. Anyone who can reach this page can do this.</p>
+    </details>
+
     <details id="panel-receiver" data-panel="receiver">
       <summary>Receiver</summary>
       <div class="row"><label for="lo">LO</label><input id="lo" type="text" inputmode="decimal" spellcheck="false"><span class="unit">MHz</span></div>

@@ -2,7 +2,13 @@
 #
 # nvs and phy_init sit where the stock firmware has them, so the stored
 # HaLow credentials survive flashing this app over the stock one.
+# HaLowScope runs from factory; ota_0..2 take other firmware from the TF
+# card (see main/flasher.h), and otadata says which one boots.
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x6000
 phy_init,   data, phy,     0xf000,   0x1000
 factory,    app,  factory, 0x10000,  0x400000
+otadata,    data, ota,     0x410000, 0x2000
+ota_0,      app,  ota_0,   0x420000, 0x400000
+ota_1,      app,  ota_1,   0x820000, 0x400000
+ota_2,      app,  ota_2,   0xc20000, 0x3e0000

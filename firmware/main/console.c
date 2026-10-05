@@ -6,6 +6,8 @@
  *   AT+CWJAP?                      show the stored SSID and the link state
  *   AT+RST                         restart
  *   AT+SDFORMAT=YES                erase and format the whole TF card
+ *   AT+BOOT?                       list the firmware slots
+ *   AT+BOOT=<slot>[,KEEP]          restart into a slot (factory is HaLowScope)
  */
 
 #include <stdio.h>
@@ -16,6 +18,9 @@
 #include "esp_system.h"
 #include "halowscope.h"
 #include "storage.h"
+#include "flasher.h"
+#include <stdlib.h>
+#include "esp_heap_caps.h"
 
 #define UART UART_NUM_0
 #define CMD_MAX 200
@@ -82,6 +87,26 @@ static void command(char *line)
         esp_restart();
     } else if (strcmp(line, "AT+SDFORMAT=YES") == 0) {
         printf(storage_format() == ESP_OK ? "OK\n" : "ERROR formatting the card\n");
+    } else if (strcasecmp(line, "AT+BOOT?") == 0) {
+        struct flasher_slot *s = heap_caps_malloc(FLASHER_SLOTS * sizeof(*s), MALLOC_CAP_SPIRAM);
+        unsigned n = s ? flasher_slots(s) : 0;
+        for (unsigned i = 0; i < n; i++)
+            printf("+BOOT:%s,\"%s\",\"%s\"%s%s\n", s[i].label, s[i].has_app ? s[i].app.project : "",
+                   s[i].has_app ? s[i].app.version : "", s[i].running ? ",running" : "", s[i].next ? ",next" : "");
+        free(s);
+        printf("OK\n");
+    } else if (strncasecmp(line, "AT+BOOT=", 8) == 0) {
+        char *slot = line + 8, *comma = strchr(slot, ',');
+        bool keep = comma && strcasecmp(comma + 1, "KEEP") == 0;
+        if (comma)
+            *comma = 0;
+        if (flasher_boot(slot, keep)) {
+            printf("OK\n");
+        } else {
+            struct flasher_status st;
+            flasher_status(&st);
+            printf("ERROR %s\n", st.busy ? "busy" : st.text);
+        }
     } else if (strcasecmp(line, "AT") == 0) {
         printf("OK\n");
     } else if (n) {

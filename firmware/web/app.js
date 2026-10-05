@@ -96,6 +96,7 @@ function connect() {
         send({t: 'clock', ms: Date.now()});   // used by the board only without NTP
         requestDetector();
         send({t: 'outputs'});
+        send({t: 'firmware'});
         showLink();
     };
     ws.onmessage = (event) => {
@@ -173,6 +174,7 @@ function onMessage(m) {
     else if (m.t === 'detector') onDetector(m);
     else if (m.t === 'event') onEvent(m);
     else if (m.t === 'outputs') onOutputs(m);
+    else if (m.t === 'firmware') onFirmware(m);
     else if (m.t === 'pong') {
         const now = performance.now();
         link.rtt = now - m.c;
@@ -652,6 +654,121 @@ $('out-save').addEventListener('click', () => {
     outputs.editing = -Infinity;
     if (send({t: 'outputs', config})) toast('Output settings saved on the board.');
     else toast('Not connected.', 'bad');
+});
+
+// ---- firmware slots ------------------------------------------------------------------------------------
+//
+// Other firmware kept on the TF card, written into a spare app slot and
+// started from here; HaLowScope stays in the factory slot.
+
+const firmware = {slots: [], files: [], card: false, busy: false, uploading: false};
+
+const appText = (a) => a ? `${a.project} ${a.version}` : 'empty';
+const mb = (bytes) => `${(bytes / 1048576).toFixed(2)} MB`;
+
+function fwButton(text, onClick) {
+    const b = Object.assign(document.createElement('button'), {type: 'button', textContent: text, className: 'small'});
+    b.addEventListener('click', onClick);
+    return b;
+}
+
+function fwItem(title, what, buttons) {
+    const li = document.createElement('li');
+    const head = document.createElement('div');
+    head.append(title, ' ');
+    const w = Object.assign(document.createElement('span'), {className: 'fw-what', textContent: what});
+    head.append(w);
+    li.append(head);
+    if (buttons.length) {
+        const row = Object.assign(document.createElement('div'), {className: 'fw-actions'});
+        row.append(...buttons);
+        li.append(row);
+    }
+    return li;
+}
+
+function emptyItem(text) {
+    return Object.assign(document.createElement('li'), {className: 'empty', textContent: text});
+}
+
+function bootSlot(slot, keep) {
+    const s = firmware.slots.find((x) => x.label === slot);
+    const what = `${slot} (${appText(s && s.app)})`;
+    const warn = slot === 'factory' ? `Restart into HaLowScope in ${what}?`
+        : keep ? `Start ${what} and keep it? It will start at every boot; coming back needs that firmware's own option, the serial console, or USB.`
+        : `Start ${what} until the next restart? This page goes away until the board is reset or power cycled.`;
+    if (!confirm(warn)) return;
+    send({t: 'firmware', boot: {slot, keep}});
+}
+
+function onFirmware(m) {
+    Object.assign(firmware, {slots: m.slots || [], files: m.files || [], card: m.card});
+    const spare = firmware.slots.filter((s) => s.label !== 'factory' && !s.running)
+        .sort((a, b) => !!a.app - !!b.app);   // empty slots first
+    $('fw-slots').replaceChildren(...firmware.slots.map((s) => {
+        const tags = [s.running && 'running', s.next && !s.running && 'starts next'].filter(Boolean).join(', ');
+        const buttons = [];
+        if (!s.running && s.app) {
+            if (s.label === 'factory') buttons.push(fwButton('Restart into it', () => bootSlot(s.label, false)));
+            else buttons.push(fwButton('Start until restart', () => bootSlot(s.label, false)),
+                              fwButton('Start and keep', () => bootSlot(s.label, true)));
+        }
+        const app = s.app ? `${appText(s.app)}${s.app.date ? `, built ${s.app.date}` : ''}` : 'empty';
+        return fwItem(s.label, `${app}${tags ? ` (${tags})` : ''}`, buttons);
+    }));
+    if (!firmware.card) $('fw-files').replaceChildren(emptyItem('No TF card.'));
+    else if (!firmware.files.length) $('fw-files').replaceChildren(emptyItem('No .bin files in /firmware.'));
+    else $('fw-files').replaceChildren(...firmware.files.map((f) => {
+        const buttons = [];
+        if (f.app) {
+            const pick = document.createElement('select');
+            pick.setAttribute('aria-label', `Slot for ${f.name}`);
+            for (const s of spare) pick.append(new Option(`${s.label} (${appText(s.app)})`, s.label));
+            if (spare.length) buttons.push(pick, fwButton('Write into slot', () => {
+                const s = firmware.slots.find((x) => x.label === pick.value);
+                if (s && s.app && !confirm(`Replace ${appText(s.app)} in ${s.label} with ${f.name}?`)) return;
+                send({t: 'firmware', install: {file: f.name, slot: pick.value}});
+            }));
+        }
+        buttons.push(fwButton('Remove', () => {
+            if (confirm(`Delete ${f.name} from the card?`)) send({t: 'firmware', remove: f.name});
+        }));
+        return fwItem(f.name, `${mb(f.size)}, ${f.app ? appText(f.app) : 'not an ESP32-S3 app image'}`, buttons);
+    }));
+}
+
+function showFirmwareStatus(f) {
+    if (!f || firmware.uploading) return;
+    const text = f.text + (f.busy && f.percent >= 0 ? ` ${f.percent} %` : '');
+    $('fw-status').textContent = text;
+    if (firmware.busy && !f.busy) send({t: 'firmware'});   // a job ended: show the slots as they are now
+    firmware.busy = f.busy;
+}
+
+$('fw-upload').addEventListener('click', () => {
+    const file = $('fw-file').files[0];
+    if (!file) return toast('Choose a firmware .bin first.', 'bad');
+    const name = file.name.replace(/[^A-Za-z0-9._-]/g, '_');
+    if (!/\.bin$/i.test(name)) return toast('Firmware files end in .bin.', 'bad');
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/firmware?name=${encodeURIComponent(name)}`);
+    firmware.uploading = true;
+    $('fw-upload').disabled = true;
+    // The board's server is busy with the upload meanwhile, so the live view
+    // pauses; progress counts as the link being alive.
+    xhr.upload.onprogress = (e) => {
+        link.last = performance.now();
+        if (e.lengthComputable) $('fw-status').textContent = `Uploading ${name}: ${Math.round(e.loaded * 100 / e.total)} %`;
+    };
+    xhr.onloadend = () => {
+        firmware.uploading = false;
+        $('fw-upload').disabled = false;
+        link.last = performance.now();
+        const ok = xhr.status === 200;
+        $('fw-status').textContent = ok ? `${name}: saved on the card.` : `${name}: ${xhr.responseText || 'upload failed'}`;
+        if (ok) send({t: 'firmware'});
+    };
+    xhr.send(file);
 });
 
 // ---- view ----------------------------------------------------------------------------------------------
@@ -1201,6 +1318,7 @@ function onStatus(m) {
     showSweep(s.sweep);
     showDevice(s);
     showOutputsStatus(s.outputs);
+    showFirmwareStatus(s.firmware);
     showLinkStats(s.link);
     enableControls();
 }
