@@ -66,7 +66,26 @@ and host settings it passes to `esp_vfs_fat_sdmmc_mount`:
 no formatting on a failed mount. The manual gives 32 GB as the largest
 card.
 
+## Camera
+
+The stock firmware builds its camera_config_t on the stack in the code
+that calls esp_camera_init, which gives the wiring:
+
+| Signal | GPIO |
+|---|---|
+| XCLK | 47 |
+| SCCB SDA / SCL | 45 / 42 |
+| D7 D6 D5 D4 | 38 48 46 18 |
+| D3 D2 D1 D0 | 14 12 13 17 |
+| VSYNC / HREF / PCLK | 40 / 39 / 21 |
+| PWDN / RESET | not connected (-1) |
+
+20 MHz XCLK, JPEG, two frame buffers. HaLowScope does not use the camera,
+so with the module unplugged these pins are free. GPIO45 and GPIO46 are
+strapping pins (flash voltage and boot mode): keep pull-ups off them at
+power-on.
+
 ## Still open
 
-- Camera DVP pins, the blue data LED.
+- The blue data LED.
 - Whether the S3's native USB (GPIO19/20) is wired anywhere.
